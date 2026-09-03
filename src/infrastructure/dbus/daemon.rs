@@ -107,7 +107,7 @@ impl NotificationDaemon {
         emit_closed_for_call(&emitter, id, CloseReason::ClosedByCall).await
     }
 
-    fn get_capabilities(&self) -> Vec<String> {
+    pub fn get_capabilities(&self) -> Vec<String> {
         // Suportado de verdade: "body" (texto puro, markup é removido via
         // strip_markup) + "icon-static" (resolve_notice_icon). "actions" e
         // "body-markup" NÃO são anunciados: actions são armazenadas/truncadas

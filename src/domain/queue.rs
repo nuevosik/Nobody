@@ -18,6 +18,12 @@ pub struct Queue {
     next_id: Arc<AtomicU32>,
 }
 
+impl Default for Queue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Queue {
     pub fn new() -> Self {
         Self {
@@ -110,7 +116,7 @@ impl Queue {
     }
 
     #[cfg(test)]
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }

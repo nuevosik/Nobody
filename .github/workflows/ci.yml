@@ -11,4 +11,6 @@ jobs:
       - run: cargo fmt --check
       - run: cargo check --all-targets
       - run: cargo clippy --all-targets -- -D warnings
+      - run: "! rg -n 'infrastructure::|crate::(daemon|icons)' src/presentation"
+      - run: "! rg -n 'presentation::' src/infrastructure"
       - run: cargo test --all-targets

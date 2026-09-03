@@ -33,18 +33,50 @@ cargo run --release
 
 ## Arquitetura
 
+Clean Architecture em quatro camadas (`src/lib.rs` re-exporta todas;
+`src/main.rs` é só bootstrap). `presentation` nunca importa
+`infrastructure` e vice-versa — as camadas só se falam via `Queue`.
+Detalhes em `docs/architecture.md`.
+
 ```
 src/
-├── main.rs          inicialização GPUI
-├── daemon.rs        interface D-Bus e sinais
-├── queue.rs         estado compartilhado, IDs e pedidos de fechamento
-├── provider.rs      política de timeout e orquestração da UI
-├── icons.rs         resolução limitada e cache de ícones
-├── state.rs         modelos de domínio
-└── ui/
-    ├── stack.rs     Layer Shell, sincronização e interação
-    ├── popup.rs     cartão de notificação e acessibilidade
-    └── anim.rs      animações
+  main.rs
+  lib.rs
+  domain/
+    mod.rs
+    notice.rs
+    queue.rs
+    ids.rs
+    close.rs
+  application/
+    mod.rs
+    policy.rs
+    commands.rs
+    clock.rs
+  infrastructure/
+    mod.rs
+    dbus/
+      mod.rs
+      daemon.rs
+      validation.rs
+      markup.rs
+      host.rs
+    icons/
+      mod.rs
+      resolver.rs
+      lookup.rs
+      desktop.rs
+      cache.rs
+  presentation/
+    mod.rs
+    theme.rs
+    shell/
+      mod.rs
+      window.rs
+      geometry.rs
+      feed.rs
+      popup.rs
+      anim.rs
 ```
 
 ## Desenvolvimento
