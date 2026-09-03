@@ -1,12 +1,12 @@
 //! Infrastructure — D-Bus `org.freedesktop.Notifications`.
+//! Toma posse do nome no session bus. Apps chamam `Notify` aqui.
 use std::collections::HashMap;
 use zbus::fdo;
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::OwnedValue;
 
-use crate::application::clock;
-use crate::application::{commands, policy};
+use crate::application::{clock, commands, policy};
 use crate::domain::close::CloseReason;
 use crate::domain::notice::Notice;
 use crate::domain::queue::Queue;

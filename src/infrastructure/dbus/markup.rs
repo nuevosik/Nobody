@@ -1,4 +1,5 @@
 //! Infrastructure/dbus — remove markup, preserva `<` literal e decodifica entidades.
+/// Remove tags HTML e decodifica entidades básicas.
 pub fn strip_markup(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();

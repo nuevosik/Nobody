@@ -2,7 +2,7 @@
 //! + `providers/tray.rs`).
 //!
 //! Acha um PNG/SVG no disco a partir de nome, hint ou desktop entry.
-pub mod cache;
+pub(crate) mod cache;
 pub mod desktop;
 pub mod lookup;
 mod resolver;

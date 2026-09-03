@@ -1,4 +1,5 @@
 //! Domain — fila compartilhada entre D-Bus e UI.
+//! Thread-safe, poison-safe, com limite fixo.
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};

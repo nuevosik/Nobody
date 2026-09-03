@@ -4,7 +4,7 @@ use zbus::zvariant::OwnedValue;
 
 pub const MAX_SUMMARY_LEN: usize = 200;
 pub const MAX_BODY_LEN: usize = 500;
-pub const MAX_ACTIONS: usize = 20;
+pub const MAX_ACTIONS: usize = 20; // 10 pares key+label
 pub const MAX_ACTION_LEN: usize = 64;
 pub const MAX_HINTS: usize = 64;
 pub const MAX_ICON_LEN: usize = 512;
@@ -17,6 +17,7 @@ pub fn truncate(s: &str, max: usize) -> String {
 }
 
 pub(crate) fn is_critical(hints: &HashMap<String, OwnedValue>) -> bool {
+    // Spec: urgency = byte (0 low, 1 normal, 2 critical). Alguns clientes enviam i32.
     if let Some(v) = hints.get("urgency") {
         if let Ok(cloned) = v.try_clone()
             && let Ok(b) = u8::try_from(cloned)

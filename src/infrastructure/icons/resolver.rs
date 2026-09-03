@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use zbus::zvariant::OwnedValue;
 
 use super::desktop::icon_from_desktop;
-use super::resolve_named_icon;
+use super::lookup::resolve_named_icon;
 
 pub fn resolve_notice_icon(
     app_icon: &str,

@@ -1,7 +1,7 @@
 //! Infra/icons — desktop entries (.desktop).
 use std::path::{Path, PathBuf};
 
-use super::resolve_named_icon;
+use super::lookup::resolve_named_icon;
 
 pub(crate) fn icon_from_desktop(id: &str) -> Option<PathBuf> {
     let id = id.trim().trim_end_matches(".desktop");

@@ -10,3 +10,9 @@ fn caps_are_body_and_icon_static_only() {
     assert!(!caps.contains(&"actions".to_string()));
     assert!(!caps.contains(&"body-markup".to_string()));
 }
+
+#[test]
+fn close_missing_id_is_silent() {
+    let q = Queue::new();
+    assert!(q.remove(999_999).is_none());
+}
