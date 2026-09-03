@@ -1,42 +1,15 @@
-//! Domain — fila de notificações compartilhada entre D-Bus e UI.
-//! Thread-safe, poison-safe, com limite fixo.
-
+//! Domain — fila compartilhada entre D-Bus e UI.
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex};
 
+pub use crate::domain::close::{CloseReason, CloseRequest, PushOutcome};
+use crate::domain::ids::{next_available_id, reserve_id};
 use crate::domain::notice::Notice;
 
 /// Mantém no máximo 12 notificações no queue (UI renderiza só 5).
 /// 12 = buffer para não perder burst enquanto animação de saída roda.
 pub const KEEP: usize = 12;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u32)]
-pub enum CloseReason {
-    Expired = 1,
-    DismissedByUser = 2,
-    ClosedByCall = 3,
-    Undefined = 4,
-}
-
-impl CloseReason {
-    pub const fn code(self) -> u32 {
-        self as u32
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CloseRequest {
-    pub id: u32,
-    pub reason: CloseReason,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct PushOutcome {
-    pub id: u32,
-    pub evicted: Vec<Notice>,
-}
 
 #[derive(Clone)]
 pub struct Queue {
@@ -59,7 +32,7 @@ impl Queue {
 
         if replaces != 0 {
             if let Some(pos) = inner.iter().position(|n| n.id == replaces) {
-                self.reserve_id(replaces);
+                reserve_id(&self.next_id, replaces);
                 // Substituição: remove antigo e reinsere no topo como nova chegada
                 inner.remove(pos);
                 notice.id = replaces;
@@ -68,10 +41,10 @@ impl Queue {
             }
             // replaces solicitado mas não existe → aloca ID novo (não squatta ID arbitrário)
             // ainda reserva para evitar reutilização imediata
-            self.reserve_id(replaces);
+            reserve_id(&self.next_id, replaces);
         }
 
-        let id = self.next_available_id(&inner);
+        let id = next_available_id(&self.next_id, &inner);
         notice.id = id;
         inner.push_front(notice);
         let mut evicted = Vec::new();
@@ -123,13 +96,7 @@ impl Queue {
             // prioriza interação do usuário sobre expiração
             if existing.reason != reason {
                 // DismissedByUser e ClosedByCall têm precedência sobre Expired/Undefined
-                let priority = |r: CloseReason| match r {
-                    CloseReason::DismissedByUser => 3,
-                    CloseReason::ClosedByCall => 3,
-                    CloseReason::Expired => 2,
-                    CloseReason::Undefined => 1,
-                };
-                if priority(reason) > priority(existing.reason) {
+                if reason.priority() > existing.reason.priority() {
                     existing.reason = reason;
                 }
             }
@@ -140,59 +107,6 @@ impl Queue {
 
     pub fn drain_close_requests(&self) -> Vec<CloseRequest> {
         self.close_requests.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect()
-    }
-
-    fn next_available_id(&self, notices: &VecDeque<Notice>) -> u32 {
-        // tenta no máximo (u32::MAX tentativas seria loop infinito; KEEP=12 então colisão rara)
-        // mas trata wrap-around sem devolver duplicata
-        let mut attempts = 0;
-        loop {
-            let id = self
-                .next_id
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                    Some(current.checked_add(1).unwrap_or(1))
-                })
-                .expect("the ID generator always produces a value");
-            if !notices.iter().any(|notice| notice.id == id) {
-                return id;
-            }
-            attempts += 1;
-            // se todas as 12 IDs ocupadas coincidirem repetidamente (quase impossível),
-            // após KEEP*2 tentativas força alocação de novo ID sequencial ignorando colisão
-            // mas nunca retorna duplicata quando id==MAX já ocupado
-            if attempts > KEEP * 4 {
-                // busca linear por ID livre
-                for cand in 1..=u32::MAX {
-                    if !notices.iter().any(|n| n.id == cand) {
-                        let _ =
-                            self.next_id.fetch_update(Ordering::AcqRel, Ordering::Acquire, |_| {
-                                Some(cand.checked_add(1).unwrap_or(1))
-                            });
-                        return cand;
-                    }
-                    if cand == u32::MAX {
-                        break;
-                    }
-                }
-                // fallback extremo: retorna id mesmo duplicado só se queue lotada de MAX (teórico)
-                return id;
-            }
-        }
-    }
-
-    fn reserve_id(&self, id: u32) {
-        if id == u32::MAX {
-            // wrap-around: id+1 seria 1 e rebobinaria next_id (ex: 3 -> 1).
-            // Só avança se já está no MAX; senão mantém para preservar monotonicidade.
-            let _ = self.next_id.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                (current == u32::MAX).then_some(1)
-            });
-            return;
-        }
-        let next = id + 1;
-        let _ = self.next_id.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            (current <= id).then_some(next)
-        });
     }
 
     #[cfg(test)]
@@ -341,21 +255,6 @@ mod tests {
             q.drain_close_requests(),
             vec![CloseRequest { id: 3, reason: CloseReason::Expired }]
         );
-    }
-
-    #[test]
-    fn reserve_id_never_rewinds_past_max() {
-        use std::sync::atomic::Ordering;
-        // Root cause: `(current <= id).then_some(id+1 ou 1)` com id=u32::MAX
-        // e current pequeno rebobinava next_id para 1 (reuso não-monotônico).
-        let q = Queue::new();
-        let a = push(&q, 0, mk(0, "A"));
-        let b = push(&q, 0, mk(0, "B"));
-        assert_ne!(a, b);
-        let before = q.next_id.load(Ordering::SeqCst);
-        q.reserve_id(u32::MAX);
-        let after = q.next_id.load(Ordering::SeqCst);
-        assert_eq!(after, before, "reserve(u32::MAX) não pode rebobinar {before} -> {after}");
     }
 
     #[test]
