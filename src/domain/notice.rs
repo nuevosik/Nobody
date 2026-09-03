@@ -60,9 +60,3 @@ mod tests {
         assert!(!n.is_expired_at(500));
     }
 }
-
-#[derive(Clone, Default)]
-pub struct Stack {
-    /// Mais recente primeiro.
-    pub notices: Vec<Notice>,
-}
