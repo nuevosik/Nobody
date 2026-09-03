@@ -10,7 +10,7 @@ use gpui::{
 };
 use zbus::fdo::RequestNameReply;
 
-use crate::application::{clock, provider};
+use crate::application::{clock, commands};
 use crate::domain::notice::{Notice, Stack};
 use crate::domain::queue::Queue;
 use crate::infrastructure::dbus::daemon::{self, NOTIFICATION_PATH, NotificationDaemon};
@@ -98,7 +98,7 @@ impl NotificationStack {
     }
 
     fn dismiss(&self, id: u32) {
-        provider::request_dismissal(&self.queue, id);
+        commands::request_dismissal(&self.queue, id);
     }
 
     fn sync_window_geometry(&mut self, window: &mut Window, total_h: f32, n: usize) {
@@ -208,7 +208,7 @@ fn spawn_dbus(queue: Queue, cx: &mut Context<NotificationStack>) {
 
         loop {
             flush_lifecycle_events(&conn, &queue).await;
-            let snapshot = provider::snapshot(&queue);
+            let snapshot = commands::snapshot(&queue);
 
             if this
                 .update(cx, |stack, cx| {
@@ -265,7 +265,7 @@ async fn flush_lifecycle_events(connection: &zbus::Connection, queue: &Queue) {
         }
     };
 
-    for notice in provider::expire(queue, clock::now_ms()) {
+    for notice in commands::expire(queue, clock::now_ms()) {
         if let Err(error) = daemon::emit_notification_closed(
             interface.signal_emitter(),
             notice.id,

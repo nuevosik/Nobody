@@ -9,7 +9,7 @@ use zbus::object_server::SignalEmitter;
 use zbus::zvariant::OwnedValue;
 
 use crate::application::clock;
-use crate::application::provider;
+use crate::application::{commands, policy};
 use crate::domain::notice::Notice;
 use crate::domain::queue::{CloseReason, Queue};
 use crate::infrastructure::icons::resolve_notice_icon;
@@ -42,7 +42,7 @@ impl NotificationDaemon {
         expire_timeout: i32,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<u32> {
-        for notice in provider::expire(&self.queue, clock::now_ms()) {
+        for notice in commands::expire(&self.queue, clock::now_ms()) {
             emit_closed_for_call(&emitter, notice.id, CloseReason::Expired).await?;
         }
 
@@ -86,7 +86,7 @@ impl NotificationDaemon {
             body,
             icon,
             actions,
-            expire_ms: provider::effective_expire_timeout(expire_timeout, is_crit),
+            expire_ms: policy::effective_expire_timeout(expire_timeout, is_crit),
             arrived_at_ms: clock::now_ms(),
         };
         let outcome = self.queue.push_with_outcome(replaces_id, notice);
