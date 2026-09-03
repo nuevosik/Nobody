@@ -1,8 +1,5 @@
 //! Infrastructure — D-Bus `org.freedesktop.Notifications`.
-//! Toma posse do nome no session bus. Apps chamam `Notify` aqui.
-
 use std::collections::HashMap;
-
 use zbus::fdo;
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
@@ -10,18 +7,17 @@ use zbus::zvariant::OwnedValue;
 
 use crate::application::clock;
 use crate::application::{commands, policy};
+use crate::domain::close::CloseReason;
 use crate::domain::notice::Notice;
-use crate::domain::queue::{CloseReason, Queue};
+use crate::domain::queue::Queue;
+use crate::infrastructure::dbus::markup::strip_markup;
+use crate::infrastructure::dbus::validation::{
+    MAX_ACTION_LEN, MAX_ACTIONS, MAX_BODY_LEN, MAX_HINTS, MAX_ICON_LEN, MAX_SUMMARY_LEN,
+    is_critical, truncate,
+};
 use crate::infrastructure::icons::resolve_notice_icon;
 
 pub const NOTIFICATION_PATH: &str = "/org/freedesktop/Notifications";
-
-const MAX_SUMMARY_LEN: usize = 200;
-const MAX_BODY_LEN: usize = 500;
-const MAX_ACTIONS: usize = 20; // 10 pares key+label
-const MAX_ACTION_LEN: usize = 64;
-const MAX_HINTS: usize = 64;
-const MAX_ICON_LEN: usize = 512;
 
 pub struct NotificationDaemon {
     pub queue: Queue,
@@ -157,89 +153,6 @@ async fn emit_closed_for_call(
         .map_err(|error| fdo::Error::Failed(error.to_string()))
 }
 
-#[allow(clippy::collapsible_if)]
-fn is_critical(hints: &HashMap<String, OwnedValue>) -> bool {
-    // Spec: urgency = byte (0 low, 1 normal, 2 critical). Alguns clientes enviam i32.
-    if let Some(v) = hints.get("urgency") {
-        if let Ok(cloned) = v.try_clone() {
-            if let Ok(b) = u8::try_from(cloned) {
-                return b >= 2;
-            }
-        }
-        // fallback: tenta como i32/u32 para clientes não-conformes
-        if let Ok(cloned) = v.try_clone() {
-            if let Ok(n) = i32::try_from(cloned) {
-                return n >= 2;
-            }
-        }
-    }
-    false
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    s.chars().take(max).collect()
-}
-
-/// Remove tags HTML e decodifica entidades básicas.
-/// Só remove `<...>` que parecem tags reais; `<` sem `>` ou com espaço após `<`
-/// é tratado como literal (evita `5 < 10` virar `5  10` e tags não-fechadas perderem resto).
-fn strip_markup(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '<' {
-            // sem fechamento → literal
-            let Some(rel_end) = chars[i + 1..].iter().position(|&c| c == '>') else {
-                out.push(chars[i]);
-                i += 1;
-                continue;
-            };
-            let end = i + 1 + rel_end;
-            // conteúdo entre < e >
-            let inner: String = chars[i + 1..end].iter().collect();
-            // tag válida não começa com espaço e não contém '<' aninhado
-            let starts_with_space = chars.get(i + 1).is_some_and(|c| c.is_whitespace());
-            let has_nested_lt = inner.contains('<');
-            let trimmed = inner.trim();
-            let looks_like_tag = !starts_with_space
-                && !has_nested_lt
-                && !trimmed.is_empty()
-                && trimmed
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '/' || c == '!' || c == '?');
-            if looks_like_tag {
-                // pula tag inteira
-                i = end + 1;
-                continue;
-            } else {
-                // não é tag → '<' literal
-                out.push('<');
-                i += 1;
-                continue;
-            }
-        } else {
-            out.push(chars[i]);
-            i += 1;
-        }
-    }
-    // Ordem importa: &amp; por último para não double-decode &lt;
-    out.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&#39;", "'")
-        .replace("&#x27;", "'")
-        .replace("&#34;", "\"")
-        .replace("&amp;", "&")
-        .trim()
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,22 +177,5 @@ mod tests {
         assert!(caps.contains(&"icon-static".to_string()));
         assert!(!caps.contains(&"body-markup".to_string()));
         assert!(!caps.contains(&"actions".to_string()));
-    }
-
-    #[test]
-    fn detects_critical_urgency() {
-        let hints = HashMap::from([("urgency".into(), OwnedValue::from(2_u8))]);
-
-        assert!(is_critical(&hints));
-    }
-
-    #[test]
-    fn strip_markup_basic() {
-        assert_eq!(strip_markup("<b>oi</b> &amp; ola"), "oi & ola");
-    }
-
-    #[test]
-    fn truncate_limits() {
-        assert_eq!(truncate("abcdef", 3), "abc");
     }
 }
