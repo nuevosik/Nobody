@@ -1,6 +1,6 @@
 //! UI — helpers de animação.
 
-use crate::time;
+use crate::application::clock;
 
 /// Duração da animação de entrada/saída em ms.
 pub const ENTER_MS: u128 = 220;
@@ -12,12 +12,12 @@ pub fn ease_out_cubic(t: f32) -> f32 {
 }
 
 pub fn enter_progress(arrived_at_ms: u128) -> f32 {
-    let elapsed = time::elapsed_ms(arrived_at_ms) as f32 / ENTER_MS as f32;
+    let elapsed = clock::elapsed_ms(arrived_at_ms) as f32 / ENTER_MS as f32;
     ease_out_cubic(elapsed.clamp(0., 1.))
 }
 
 pub fn exit_progress(start_ms: u128) -> f32 {
-    let elapsed = time::elapsed_ms(start_ms) as f32 / EXIT_MS as f32;
+    let elapsed = clock::elapsed_ms(start_ms) as f32 / EXIT_MS as f32;
     ease_out_cubic(elapsed.clamp(0., 1.))
 }
 

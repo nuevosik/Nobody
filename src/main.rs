@@ -6,21 +6,17 @@
 //!   infrastructure→ `daemon`, `icons`
 //!   presentation  → `ui::{stack, popup, anim}`, `theme`
 
-mod daemon;
-mod icons;
-mod provider;
-mod queue;
-mod state;
-mod theme;
-mod time;
-mod ui;
+mod application;
+mod domain;
+mod infrastructure;
+mod presentation;
 
 use gpui::App;
 use gpui_platform::application;
 
 fn main() {
     application().run(|cx: &mut App| {
-        if let Err(e) = ui::stack::open_window(cx) {
+        if let Err(e) = presentation::shell::stack::open_window(cx) {
             eprintln!("nobody: falha ao abrir janela LayerShell: {e:#}");
             std::process::exit(1);
         }

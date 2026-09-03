@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::state::Notice;
+use crate::domain::notice::Notice;
 
 /// Mantém no máximo 12 notificações no queue (UI renderiza só 5).
 /// 12 = buffer para não perder burst enquanto animação de saída roda.
@@ -204,7 +204,7 @@ impl Queue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::Notice;
+    use crate::domain::notice::Notice;
 
     fn mk(id: u32, app: &str) -> Notice {
         Notice {

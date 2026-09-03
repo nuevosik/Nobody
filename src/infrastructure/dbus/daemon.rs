@@ -8,11 +8,11 @@ use zbus::interface;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::OwnedValue;
 
-use crate::icons::resolve_notice_icon;
-use crate::provider;
-use crate::queue::{CloseReason, Queue};
-use crate::state::Notice;
-use crate::time;
+use crate::application::clock;
+use crate::application::provider;
+use crate::domain::notice::Notice;
+use crate::domain::queue::{CloseReason, Queue};
+use crate::infrastructure::icons::resolve_notice_icon;
 
 pub const NOTIFICATION_PATH: &str = "/org/freedesktop/Notifications";
 
@@ -42,7 +42,7 @@ impl NotificationDaemon {
         expire_timeout: i32,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<u32> {
-        for notice in provider::expire(&self.queue, time::now_ms()) {
+        for notice in provider::expire(&self.queue, clock::now_ms()) {
             emit_closed_for_call(&emitter, notice.id, CloseReason::Expired).await?;
         }
 
@@ -87,7 +87,7 @@ impl NotificationDaemon {
             icon,
             actions,
             expire_ms: provider::effective_expire_timeout(expire_timeout, is_crit),
-            arrived_at_ms: time::now_ms(),
+            arrived_at_ms: clock::now_ms(),
         };
         let outcome = self.queue.push_with_outcome(replaces_id, notice);
 

@@ -2,8 +2,8 @@
 
 use gpui::{FontWeight, ParentElement, Styled, StyledImage, div, img, prelude::*, px};
 
-use crate::state::Notice;
-use crate::theme::{
+use crate::domain::notice::Notice;
+use crate::presentation::theme::{
     CHIP, MUTED, TEXT, TEXT_BADGE, TEXT_BODY, TEXT_LABEL, TEXT_TITLE, app_font, fade,
 };
 

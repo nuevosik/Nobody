@@ -1,7 +1,7 @@
 //! Application layer — política de expiração e comandos da UI.
 
-use crate::queue::{CloseReason, Queue};
-use crate::state::Notice;
+use crate::domain::notice::Notice;
+use crate::domain::queue::{CloseReason, Queue};
 
 /// Timeout usado quando o cliente delega a decisão ao servidor (`expire_timeout = -1`).
 pub const DEFAULT_EXPIRE_MS: i32 = 5_000;

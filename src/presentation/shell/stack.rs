@@ -10,11 +10,13 @@ use gpui::{
 };
 use zbus::fdo::RequestNameReply;
 
-use crate::daemon::{self, NOTIFICATION_PATH, NotificationDaemon};
-use crate::queue::Queue;
-use crate::state::{Notice, Stack};
-use crate::theme::{ACCENT, CARD_GAP, CARD_H, CARD_R, FONT, INK, MARGIN, POPUP_W, fade};
-use crate::{provider, time};
+use crate::application::{clock, provider};
+use crate::domain::notice::{Notice, Stack};
+use crate::domain::queue::Queue;
+use crate::infrastructure::dbus::daemon::{self, NOTIFICATION_PATH, NotificationDaemon};
+use crate::presentation::theme::{
+    ACCENT, CARD_GAP, CARD_H, CARD_R, FONT, INK, MARGIN, POPUP_W, fade,
+};
 
 use super::anim;
 use super::popup;
@@ -141,7 +143,7 @@ fn spawn_anim_ticker(cx: &mut Context<NotificationStack>) {
                     .stack
                     .notices
                     .iter()
-                    .any(|n| time::elapsed_ms(n.arrived_at_ms) < anim::ENTER_MS);
+                    .any(|n| clock::elapsed_ms(n.arrived_at_ms) < anim::ENTER_MS);
                 let exiting = !stack.exiting.is_empty();
                 entering || exiting
             }) else {
@@ -210,7 +212,7 @@ fn spawn_dbus(queue: Queue, cx: &mut Context<NotificationStack>) {
 
             if this
                 .update(cx, |stack, cx| {
-                let now_ms = time::now_ms();
+                let now_ms = clock::now_ms();
                 let mut removed: Vec<(u32, f32)> = Vec::new();
                 for (idx, old) in stack.stack.notices.iter().enumerate() {
                     if !snapshot.iter().any(|n| n.id == old.id) {
@@ -228,7 +230,7 @@ fn spawn_dbus(queue: Queue, cx: &mut Context<NotificationStack>) {
                         });
                     }
                 }
-                stack.exiting.retain(|e| time::elapsed_ms(e.start_ms) < anim::EXIT_MS);
+                stack.exiting.retain(|e| clock::elapsed_ms(e.start_ms) < anim::EXIT_MS);
 
                 if stack.stack.notices != snapshot || !removed.is_empty() {
                     stack.stack = Stack { notices: snapshot };
@@ -263,11 +265,11 @@ async fn flush_lifecycle_events(connection: &zbus::Connection, queue: &Queue) {
         }
     };
 
-    for notice in provider::expire(queue, time::now_ms()) {
+    for notice in provider::expire(queue, clock::now_ms()) {
         if let Err(error) = daemon::emit_notification_closed(
             interface.signal_emitter(),
             notice.id,
-            crate::queue::CloseReason::Expired,
+            crate::domain::queue::CloseReason::Expired,
         )
         .await
         {
@@ -295,7 +297,7 @@ impl gpui::Render for NotificationStack {
 
         // Filtra expirados já passados do EXIT_MS sem mutar durante render
         let exiting_alive: Vec<&Exiting> =
-            self.exiting.iter().filter(|e| time::elapsed_ms(e.start_ms) < anim::EXIT_MS).collect();
+            self.exiting.iter().filter(|e| clock::elapsed_ms(e.start_ms) < anim::EXIT_MS).collect();
         let exiting_max_y = exiting_alive.iter().map(|e| e.y + card_h).fold(0., f32::max);
         let total_h_current = total_h_current_for(&self.stack.notices, n);
         let total_h = if exiting_alive.is_empty() {
@@ -397,7 +399,7 @@ impl gpui::Render for NotificationStack {
             .children({
                 self.exiting
                     .iter()
-                    .filter(|e| time::elapsed_ms(e.start_ms) < anim::EXIT_MS)
+                    .filter(|e| clock::elapsed_ms(e.start_ms) < anim::EXIT_MS)
                     .map(|ex| {
                         let t = anim::exit_progress(ex.start_ms);
                         let y = if reduced { ex.y } else { ex.y - t * 12. };
