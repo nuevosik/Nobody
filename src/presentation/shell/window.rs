@@ -157,7 +157,7 @@ impl gpui::Render for NotificationStack {
                     .map(move |(i, notice)| {
                         let y_target = y_map[i];
                         let t = anim::enter_progress(notice.arrived_at_ms);
-                        let y = if reduced { y_target } else { y_target - (1. - t) * 28. };
+                        let slide = if reduced { 0. } else { (1. - t) * 28. };
                         let base_opacity =
                             if i == 0 { 1. } else { (1. - i as f32 * 0.14).clamp(0.55, 1.) };
                         let opacity = t * base_opacity;
@@ -165,8 +165,8 @@ impl gpui::Render for NotificationStack {
                         div()
                             .id(("notif", notice_id))
                             .absolute()
-                            .top(px(y))
-                            .right(px(MARGIN))
+                            .top(px(y_target))
+                            .right(px(MARGIN - slide))
                             .w(px(POPUP_W))
                             .min_h(px(card_h))
                             .rounded(px(CARD_R))
