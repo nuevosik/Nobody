@@ -5,13 +5,13 @@ use std::collections::HashMap;
 use gpui::{Bounds, Size, Window, point, px, size};
 
 use crate::domain::notice::Notice;
-use crate::presentation::theme::{CARD_GAP, CARD_H, MARGIN, POPUP_W};
+use crate::presentation::theme::{CARD_GAP, CARD_H, MARGIN, POPUP_W, STACK_TOP};
 
 const DECK_GAP: f32 = 16.;
 const MIN_HIT: f32 = 24.;
 
 pub(crate) fn grouped_y(notices: &[Notice], idx: usize) -> f32 {
-    grouped_y_map(notices).get(idx).copied().unwrap_or(MARGIN)
+    grouped_y_map(notices).get(idx).copied().unwrap_or(STACK_TOP)
 }
 
 /// Calcula Y agrupado por app em O(n).
@@ -29,7 +29,7 @@ pub fn grouped_y_map(notices: &[Notice]) -> Vec<f32> {
         app_to_indices.entry(n.app.clone()).or_default().push(i);
     }
     let mut y_map = vec![0.; notices.len()];
-    let mut y_cursor = MARGIN;
+    let mut y_cursor = STACK_TOP;
     for app in app_order {
         if let Some(indices) = app_to_indices.get(&app) {
             for (k, &orig_idx) in indices.iter().enumerate() {
@@ -50,7 +50,7 @@ pub fn total_h_current_for(notices: &[Notice], n: usize) -> f32 {
         return 0.;
     }
     let y_map = grouped_y_map(notices);
-    y_map.iter().take(n).fold(MARGIN, |a, &y| a.max(y)) + CARD_H
+    y_map.iter().take(n).fold(STACK_TOP, |a, &y| a.max(y)) + CARD_H
 }
 
 /// Redimensiona a janela e recalcula a `input_region` só quando necessário.
@@ -79,7 +79,7 @@ pub fn sync_window_geometry(
         }
         let cards: Vec<Bounds<gpui::Pixels>> = (0..n)
             .map(|i| {
-                let y = y_map.get(i).copied().unwrap_or(MARGIN);
+                let y = y_map.get(i).copied().unwrap_or(STACK_TOP);
                 let is_last_in_group = last_idx_per_app.get(&notices[i].app).copied() == Some(i);
                 let h = if is_last_in_group { CARD_H } else { MIN_HIT };
                 Bounds {
@@ -112,19 +112,19 @@ mod tests {
 
     #[test]
     fn interleaved_apps_total_h_uses_max_y_not_last_index() {
-        // A,B,A intercalados: y_map = [MARGIN, 120, MARGIN+DECK_GAP].
-        // total_h correto = max(y[0..3]) + CARD_H = 120 + 76 = 196,
-        // não y[2] + CARD_H = 28 + 76 = 104 (janela cliparia o card B).
+        // A,B,A intercalados: y_map = [STACK_TOP, 154, STACK_TOP+DECK_GAP].
+        // total_h correto = max(y[0..3]) + CARD_H = 154 + 76 = 230,
+        // não y[2] + CARD_H = 62 + 76 = 138 (janela cliparia o card B).
         let notices = vec![mk(1, "A"), mk(2, "B"), mk(3, "A")];
         let n = notices.len();
         let y_map = grouped_y_map(&notices);
         assert_eq!(y_map.len(), 3);
-        let expected = y_map.iter().take(n).fold(MARGIN, |a, &y| a.max(y)) + CARD_H;
-        assert!((expected - 196.).abs() < 0.01, "expected 196, got {expected}");
+        let expected = y_map.iter().take(n).fold(STACK_TOP, |a, &y| a.max(y)) + CARD_H;
+        assert!((expected - 230.).abs() < 0.01, "expected 230, got {expected}");
         let buggy = y_map[n - 1] + CARD_H;
         assert!(
-            (buggy - 104.).abs() < 0.01,
-            "precondição do bug: y[n-1]+CARD_H deve ser 104, foi {buggy}"
+            (buggy - 138.).abs() < 0.01,
+            "precondição do bug: y[n-1]+CARD_H deve ser 138, foi {buggy}"
         );
         let got = total_h_current_for(&notices, n);
         assert!(

@@ -8,6 +8,8 @@ pub const CARD_H: f32 = 76.;
 pub const CARD_GAP: f32 = 16.;
 pub const MARGIN: f32 = 12.;
 pub const POPUP_W: f32 = 380.;
+// Topo da pilha: limpa a waybar (34px) + respiro de MARGIN.
+pub const STACK_TOP: f32 = 46.;
 
 // Tipografia — "SF Pro Display" não existe no Arch Linux; o GPUI resolve
 // via `resolve_font()` para a pilha interna (Noto Sans, …) quando a família
