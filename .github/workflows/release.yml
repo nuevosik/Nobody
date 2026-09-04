@@ -1,0 +1,62 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake pkg-config libssl-dev libwayland-dev libxkbcommon-dev \
+            libvulkan-dev mesa-vulkan-drivers libasound2-dev libzstd-dev \
+            libsqlite3-dev libgit2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build --release --locked
+        env:
+          CARGO_TERM_COLOR: always
+
+      - name: pack
+        run: |
+          target=$(rustc -vV | awk '/host:/{print $2}')
+          mkdir -p dist
+          cp target/release/nobody dist/nobody
+          cp install.sh dist/install.sh
+          tar -C dist -czf "nobody-${target}.tar.gz" nobody
+          echo "ASSET=nobody-${target}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes="nobody ${GITHUB_REF_NAME}
+
+          Install:
+          \`\`\`sh
+          curl -fsSL https://github.com/nuevosik/Nobody/releases/latest/download/install.sh | sh
+          \`\`\`
+          "
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "$ASSET" dist/install.sh --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "$notes" \
+              "$ASSET" \
+              dist/install.sh
+          fi
