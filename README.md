@@ -1,42 +1,41 @@
 # Nobody
 
-Daemon de notificações para Wayland, escrito em Rust. Ele assume o nome
-`org.freedesktop.Notifications` no session bus e exibe notificações em uma
-camada GPUI no canto superior direito da tela.
+Notification daemon for Wayland, written in Rust. It owns the
+`org.freedesktop.Notifications` name on the session bus and shows notifications
+in a GPUI layer on the top-right corner of the screen.
 
-## Executar
+## Run
 
-O Nobody precisa de uma sessão Wayland com Layer Shell e de um session bus D-Bus.
-Pare qualquer daemon que já possua o nome de notificações (por exemplo, mako) e
-execute:
+Nobody needs a Wayland session with Layer Shell and a D-Bus session bus.
+Stop any daemon that already owns the notifications name (e.g. mako) and run:
 
 ```bash
 cargo run --release
 ```
 
-## Comportamento atual
+## Current behavior
 
-- Implementa `Notify`, `CloseNotification`, `GetCapabilities` e
-  `GetServerInformation` do protocolo Desktop Notifications.
-- Mantém até 12 notificações ativas e renderiza as cinco mais recentes.
-- Emite `NotificationClosed` para expiração, descarte pelo usuário,
-  `CloseNotification` e descarte por capacidade.
-- Substitui uma notificação de forma atômica quando recebe `replaces_id`.
-- Usa o timeout pedido pelo cliente; `-1` usa o padrão do servidor (5 segundos),
-  `0` nunca expira e notificações críticas nunca expiram automaticamente.
-- Aceita caminhos/nome de ícone e `desktop-entry`. A busca é limitada a locais
-  conhecidos para não varrer o disco em cada notificação.
-- Suporta corpo de texto. Markup é removido antes da renderização; ações,
-  `image-data` e histórico persistente ainda não são suportados.
-- Clique, Enter, Espaço ou Escape dispensam uma notificação. Defina
-  `PREFERS_REDUCED_MOTION=1` para desativar animações.
+- Implements `Notify`, `CloseNotification`, `GetCapabilities` and
+  `GetServerInformation` from the Desktop Notifications protocol.
+- Keeps up to 12 active notifications and renders the five most recent.
+- Emits `NotificationClosed` for expiry, user dismissal,
+  `CloseNotification` and capacity eviction.
+- Atomically replaces a notification when it receives `replaces_id`.
+- Honors the client-requested timeout; `-1` uses the server default (5 seconds),
+  `0` never expires and critical notifications never expire automatically.
+- Accepts icon paths/names and `desktop-entry`. Lookup is limited to known
+  locations so it does not scan the disk on every notification.
+- Supports text body. Markup is stripped before rendering; actions,
+  `image-data` and persistent history are not supported yet.
+- Click, Enter, Space or Escape dismisses a notification. Set
+  `PREFERS_REDUCED_MOTION=1` to disable animations.
 
-## Arquitetura
+## Architecture
 
-Clean Architecture em quatro camadas (`src/lib.rs` re-exporta todas;
-`src/main.rs` é só bootstrap). `presentation` nunca importa
-`infrastructure` e vice-versa — as camadas só se falam via `Queue`.
-Detalhes em `docs/architecture.md`.
+Clean Architecture in four layers (`src/lib.rs` re-exports all of them;
+`src/main.rs` is bootstrap only). `presentation` never imports
+`infrastructure` and vice versa — layers only talk through `Queue`.
+Details in `docs/architecture.md`.
 
 ```
 src/
@@ -79,7 +78,7 @@ src/
       anim.rs
 ```
 
-## Desenvolvimento
+## Development
 
 ```bash
 cargo fmt --check
@@ -87,9 +86,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-## Próximos passos
+## Next steps
 
-- [ ] Ações de notificação e `ActionInvoked`.
-- [ ] Suporte a `image-data` e temas de ícones completos.
-- [ ] Configuração de aparência e timeout por urgência.
-- [ ] Histórico/persistência de notificações.
+- [ ] Notification actions and `ActionInvoked`.
+- [ ] `image-data` support and full icon themes.
+- [ ] Appearance and per-urgency timeout configuration.
+- [ ] Notification history/persistence.
