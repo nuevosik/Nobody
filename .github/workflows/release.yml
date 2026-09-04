@@ -12,7 +12,7 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: system deps
         run: |
@@ -22,9 +22,9 @@ jobs:
             libvulkan-dev mesa-vulkan-drivers libasound2-dev libzstd-dev \
             libsqlite3-dev libgit2-dev
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
 
       - name: build
         run: cargo build --release --locked
@@ -38,6 +38,7 @@ jobs:
           cp target/release/nobody dist/nobody
           cp install.sh dist/install.sh
           tar -C dist -czf "nobody-${target}.tar.gz" nobody
+          sha256sum *.tar.gz > sha256sums.txt
           echo "ASSET=nobody-${target}.tar.gz" >> "$GITHUB_ENV"
 
       - name: publish
@@ -52,11 +53,12 @@ jobs:
           \`\`\`
           "
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" "$ASSET" dist/install.sh --clobber
+            gh release upload "${GITHUB_REF_NAME}" "$ASSET" sha256sums.txt dist/install.sh --clobber
           else
             gh release create "${GITHUB_REF_NAME}" \
               --title "${GITHUB_REF_NAME}" \
               --notes "$notes" \
               "$ASSET" \
+              sha256sums.txt \
               dist/install.sh
           fi

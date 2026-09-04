@@ -40,6 +40,17 @@ trap 'rm -rf "$tmp"' EXIT INT HUP
 
 printf 'downloading %s\n' "$url"
 curl -fsSL --retry 3 -o "$tmp/${asset}" "$url" || die "download failed (is there a release?)"
+sums="sha256sums.txt"
+sums_url="https://github.com/${REPO}/releases/latest/download/${sums}"
+printf 'downloading %s\n' "$sums_url"
+curl -fsSL --retry 3 -o "$tmp/${sums}" "$sums_url" || die "checksum download failed"
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$tmp" && grep " ${asset}$" "${sums}" | sha256sum -c -) || die "checksum verification failed"
+elif command -v shasum >/dev/null 2>&1; then
+  (cd "$tmp" && grep " ${asset}$" "${sums}" | shasum -a 256 -c -) || die "checksum verification failed"
+else
+  die "missing sha256sum (or shasum)"
+fi
 tar -C "$tmp" -xzf "$tmp/${asset}"
 [ -f "$tmp/${NAME}" ] || die "archive did not contain ${NAME}"
 

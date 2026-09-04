@@ -3,3 +3,11 @@
 *.orig
 .idea/
 .vscode/
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+dist/
+*.tar.gz
+.DS_Store
