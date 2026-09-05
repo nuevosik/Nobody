@@ -1,5 +1,4 @@
 /target
-/tests/
 .env
 *.orig
 .idea/
