@@ -9,7 +9,7 @@ use gpui::{
 use crate::application::{clock, commands};
 use crate::domain::queue::Queue;
 use crate::presentation::theme::{
-    ACCENT, CARD_GAP, CARD_H, CARD_R, FONT, INK, MARGIN, POPUP_W, QUIET_BADGE, fade,
+    ACCENT, CARD_GAP, CARD_H, CARD_R, CHIP, FONT, INK, MARGIN, POPUP_W, QUIET_BADGE, TEXT, fade,
 };
 
 use super::{anim, feed, geometry, popup};
@@ -25,6 +25,7 @@ pub struct NotificationStack {
     exiting: Vec<feed::Exiting>,
     queue: Queue,
     quiet: bool,
+    expanded: Option<String>,
     last_window_h: Option<f32>,
     last_input_len: usize,
 }
@@ -39,6 +40,7 @@ impl NotificationStack {
             exiting: Vec::new(),
             queue,
             quiet: false,
+            expanded: None,
             last_window_h: None,
             last_input_len: usize::MAX,
         }
@@ -113,7 +115,6 @@ impl gpui::Render for NotificationStack {
                 &mut self.last_input_len,
                 &[],
                 MARGIN + QUIET_BADGE + MARGIN,
-                0,
             );
             return div().size_full().relative().child(
                 div().absolute().top(px(MARGIN)).right(px(MARGIN)).child(popup::nobody_badge()),
@@ -126,20 +127,24 @@ impl gpui::Render for NotificationStack {
         let exiting_alive: Vec<&feed::Exiting> =
             self.exiting.iter().filter(|e| clock::elapsed_ms(e.start_ms) < anim::EXIT_MS).collect();
         let exiting_max_y = exiting_alive.iter().map(|e| e.y + card_h).fold(0., f32::max);
-        let total_h_current = geometry::total_h_current_for(&self.stack.notices, n);
+        let deck_list = geometry::decks(&self.stack.notices, self.expanded.as_deref());
+        let shown = geometry::shown_decks(&deck_list, n);
+        let (y_map, _, deck_h) = geometry::deck_layout(&self.stack.notices, &deck_list, &shown);
+        let total_h_current = deck_h;
         let total_h = if exiting_alive.is_empty() {
             total_h_current
         } else {
             total_h_current.max(exiting_max_y + CARD_GAP)
         };
+        let cards_y: Vec<f32> =
+            shown.iter().flat_map(|s| s.indices.iter().map(|&i| y_map[i])).collect();
 
         geometry::sync_window_geometry(
             window,
             &mut self.last_window_h,
             &mut self.last_input_len,
-            &self.stack.notices,
+            &cards_y,
             total_h,
-            n,
         );
 
         let announcement = self
@@ -168,26 +173,64 @@ impl gpui::Render for NotificationStack {
                     .overflow_hidden(),
             )
             .children({
-                let y_map = geometry::grouped_y_map(&self.stack.notices);
-                self.stack
-                    .notices
-                    .iter()
-                    .take(MAX_VISIBLE)
-                    .enumerate()
-                    .rev()
-                    .map(move |(i, notice)| {
-                        let y_target = y_map[i];
+                let mut slot_of: Vec<usize> = vec![0; shown.len()];
+                {
+                    let mut slot = 0;
+                    for (k, s) in shown.iter().enumerate() {
+                        slot_of[k] = slot;
+                        slot += s.indices.len();
+                    }
+                }
+                let mut els: Vec<gpui::Stateful<gpui::Div>> = Vec::new();
+                for (k, s) in shown.iter().enumerate().rev() {
+                    let deck = &deck_list[s.deck];
+                    let first_y = y_map[s.indices[0]];
+                    let last_y = y_map[*s.indices.last().expect("deck mostrado não é vazio")];
+                    let mut footprint = last_y - first_y + CARD_H;
+                    if deck.collapsed {
+                        footprint += geometry::STACK_PEEK;
+                    }
+                    let expand_app = deck.app.clone();
+                    let mut container = div()
+                        .id(format!("deck-{}", deck.app))
+                        .absolute()
+                        .top(px(first_y))
+                        .right(px(MARGIN))
+                        .w(px(POPUP_W))
+                        .h(px(footprint))
+                        .on_hover(cx.listener(move |stack, hovered: &bool, _, cx| {
+                            if *hovered {
+                                if stack.expanded.as_deref() != Some(expand_app.as_str()) {
+                                    stack.expanded = Some(expand_app.clone());
+                                    cx.notify();
+                                }
+                            } else if stack.expanded.as_deref() == Some(expand_app.as_str()) {
+                                stack.expanded = None;
+                                cx.notify();
+                            }
+                        }));
+                    for (m, &idx) in s.indices.iter().enumerate() {
+                        let slot = slot_of[k] + m;
+                        let y = y_map[idx] - first_y;
+                        let notice = &self.stack.notices[idx];
+                        let hidden = if deck.collapsed && m == 0 { deck.hidden_count() } else { 0 };
                         let t = anim::enter_progress(notice.arrived_at_ms);
                         let slide = if reduced { 0. } else { (1. - t) * (POPUP_W + MARGIN) };
+                        if hidden > 0 {
+                            container = container.child(ghost_card(y + 5., 8., slide));
+                            if hidden > 1 {
+                                container = container.child(ghost_card(y + 10., 16., slide));
+                            }
+                        }
                         let base_opacity =
-                            if i == 0 { 1. } else { (1. - i as f32 * 0.14).clamp(0.55, 1.) };
+                            if slot == 0 { 1. } else { (1. - slot as f32 * 0.14).clamp(0.55, 1.) };
                         let opacity = t * base_opacity;
                         let notice_id = notice.id;
-                        div()
+                        let mut card = div()
                             .id(("notif", notice_id))
                             .absolute()
-                            .top(px(y_target))
-                            .right(px(MARGIN - slide))
+                            .top(px(y))
+                            .right(px(-slide))
                             .w(px(POPUP_W))
                             .min_h(px(card_h))
                             .rounded(px(CARD_R))
@@ -228,9 +271,15 @@ impl gpui::Render for NotificationStack {
                             .gap(px(6.))
                             .px(px(10.))
                             .child(popup::badge(notice.icon.as_ref(), &notice.app))
-                            .child(popup::card_content(notice))
-                    })
-                    .collect::<Vec<_>>()
+                            .child(popup::card_content(notice));
+                        if hidden > 0 {
+                            card = card.child(more_chip(hidden));
+                        }
+                        container = container.child(card);
+                    }
+                    els.push(container);
+                }
+                els
             })
             .children({
                 self.exiting
@@ -265,6 +314,31 @@ impl gpui::Render for NotificationStack {
                     .collect::<Vec<_>>()
             })
     }
+}
+
+fn ghost_card(y: f32, inset: f32, slide: f32) -> gpui::Div {
+    div()
+        .absolute()
+        .top(px(y))
+        .right(px(inset - slide))
+        .w(px(POPUP_W - inset * 2.))
+        .h(px(CARD_H))
+        .rounded(px(CARD_R))
+        .bg(fade(INK, 0.35))
+}
+
+fn more_chip(hidden: usize) -> gpui::Div {
+    div()
+        .absolute()
+        .bottom(px(6.))
+        .right(px(8.))
+        .px(px(7.))
+        .py(px(1.))
+        .rounded(px(9.))
+        .bg(fade(CHIP, 0.92))
+        .text_size(px(10.))
+        .text_color(fade(TEXT, 0.9))
+        .child(format!("+{hidden}"))
 }
 
 pub fn open_window(cx: &mut gpui::App, queue: Queue) -> anyhow::Result<()> {
