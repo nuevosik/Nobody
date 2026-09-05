@@ -8,9 +8,9 @@ Built with [GPUI](https://github.com/zed-industries/zed) and zbus. No GTK, no
 
 ## Preview
 
-Spotify notification with album cover, plain notification with app initial:
+Spotify notification with the current album cover:
 
-![Spotify cover + plain notification](docs/spotify-cover.png)
+![Spotify notification with album cover](docs/spotify-cover.png)
 
 ## Install
 
