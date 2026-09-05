@@ -27,10 +27,10 @@ pub struct NotificationStack {
     queue: Queue,
     quiet: bool,
     expanded: Option<String>,
+    last_expanded: Option<String>,
     smooth_y: HashMap<u32, f32>,
     target_y: HashMap<u32, f32>,
     shown_at: HashMap<u32, u128>,
-    was_visible: HashSet<u32>,
     last_window_h: Option<f32>,
     last_input_len: usize,
 }
@@ -61,10 +61,10 @@ impl NotificationStack {
             queue,
             quiet: false,
             expanded: None,
+            last_expanded: None,
             smooth_y: HashMap::new(),
             target_y: HashMap::new(),
             shown_at: HashMap::new(),
-            was_visible: HashSet::new(),
             last_window_h: None,
             last_input_len: usize::MAX,
         }
@@ -164,21 +164,22 @@ impl gpui::Render for NotificationStack {
         self.smooth_y.retain(|id, _| live.contains(id));
         self.target_y.retain(|id, _| live.contains(id));
         self.shown_at.retain(|id, _| live.contains(id));
-        let mut now_visible: HashSet<u32> = HashSet::new();
         for s in &shown {
+            let deck_top = y_map[deck_list[s.deck].indices[0]];
             for &idx in &s.indices {
                 let id = self.stack.notices[idx].id;
-                now_visible.insert(id);
                 self.target_y.insert(id, y_map[idx]);
-                if !self.was_visible.contains(&id) {
-                    self.shown_at.insert(id, now);
-                }
-                let cur = self.smooth_y.get(&id).copied().unwrap_or(y_map[idx]);
-                let next = if reduced { y_map[idx] } else { step_toward(cur, y_map[idx]).0 };
+                self.shown_at.entry(id).or_insert(now);
+                let cur = self.smooth_y.get(&id).copied().unwrap_or(deck_top);
+                let next = if reduced || self.last_expanded != self.expanded {
+                    y_map[idx]
+                } else {
+                    step_toward(cur, y_map[idx]).0
+                };
                 self.smooth_y.insert(id, next);
             }
         }
-        self.was_visible = now_visible;
+        self.last_expanded = self.expanded.clone();
         let mut total_h_current = 0f32;
         for s in &shown {
             let deck = &deck_list[s.deck];
