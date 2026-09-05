@@ -11,4 +11,8 @@
 *.pfx
 dist/
 *.tar.gz
+sha256sums.txt
+.agents/
+.claude/
+skills-lock.json
 .DS_Store
