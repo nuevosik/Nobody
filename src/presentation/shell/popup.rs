@@ -173,4 +173,41 @@ mod tests {
         assert_eq!(badge_initial("éclair"), "É");
         assert_eq!(badge_initial("ßeta"), "S");
     }
+
+    #[test]
+    fn badge_initial_passthrough_for_upper_digit() {
+        assert_eq!(badge_initial("Firefox"), "F");
+        assert_eq!(badge_initial("123app"), "1");
+    }
+
+    fn mk_notice(summary: &str, body: &str, app: &str) -> Notice {
+        Notice {
+            id: 1,
+            app: app.into(),
+            summary: summary.into(),
+            body: body.into(),
+            icon: None,
+            actions: vec![],
+            expire_ms: 0,
+            arrived_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn a11y_label_without_body_omits_separator() {
+        let n = mk_notice("Title", "", "Firefox");
+        assert_eq!(
+            a11y_label(&n),
+            "Title de Firefox. Pressione Enter, Espaço ou Escape para dispensar"
+        );
+    }
+
+    #[test]
+    fn a11y_label_with_body_includes_summary_body_app() {
+        let n = mk_notice("Title", "Hello", "Firefox");
+        assert_eq!(
+            a11y_label(&n),
+            "Title — Hello de Firefox. Pressione Enter, Espaço ou Escape para dispensar"
+        );
+    }
 }

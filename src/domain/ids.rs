@@ -59,4 +59,52 @@ mod tests {
         let after = next_id.load(Ordering::SeqCst);
         assert_eq!(after, before, "reserve(u32::MAX) não pode rebobinar {before} -> {after}");
     }
+
+    fn mk_notice(id: u32) -> Notice {
+        Notice {
+            id,
+            app: "A".into(),
+            summary: "s".into(),
+            body: "".into(),
+            icon: None,
+            actions: vec![],
+            expire_ms: 0,
+            arrived_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn reserve_id_advances_next_then_allocate_skips_reserved() {
+        use std::sync::atomic::Ordering;
+        let next_id = AtomicU32::new(1);
+        reserve_id(&next_id, 5);
+        assert_eq!(next_id.load(Ordering::SeqCst), 6);
+        let empty = VecDeque::new();
+        assert_eq!(next_available_id(&next_id, &empty), 6);
+    }
+
+    #[test]
+    fn reserve_id_never_rewinds_when_current_is_ahead() {
+        use std::sync::atomic::Ordering;
+        let next_id = AtomicU32::new(20);
+        reserve_id(&next_id, 5);
+        assert_eq!(next_id.load(Ordering::SeqCst), 20);
+    }
+
+    #[test]
+    fn allocation_near_u32_max_wraps_to_one() {
+        let next_id = AtomicU32::new(u32::MAX - 1);
+        let empty = VecDeque::new();
+        assert_eq!(next_available_id(&next_id, &empty), u32::MAX - 1);
+        assert_eq!(next_available_id(&next_id, &empty), u32::MAX);
+        assert_eq!(next_available_id(&next_id, &empty), 1);
+    }
+
+    #[test]
+    fn next_available_id_skips_live_ids() {
+        let next_id = AtomicU32::new(1);
+        let mut notices = VecDeque::new();
+        notices.push_back(mk_notice(1));
+        assert_eq!(next_available_id(&next_id, &notices), 2);
+    }
 }

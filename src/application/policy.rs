@@ -27,4 +27,14 @@ mod tests {
     fn preserves_an_explicit_timeout_for_normal_notifications() {
         assert_eq!(effective_expire_timeout(500, false), 500);
     }
+    #[test]
+    fn other_negative_timeouts_fall_back_to_default() {
+        assert_eq!(effective_expire_timeout(-999, false), DEFAULT_EXPIRE_MS);
+        assert_eq!(effective_expire_timeout(-2, false), DEFAULT_EXPIRE_MS);
+        assert_eq!(effective_expire_timeout(i32::MIN, false), DEFAULT_EXPIRE_MS);
+    }
+    #[test]
+    fn critical_overrides_any_negative_timeout() {
+        assert_eq!(effective_expire_timeout(-999, true), 0);
+    }
 }

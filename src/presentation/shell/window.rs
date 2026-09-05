@@ -14,6 +14,12 @@ use crate::presentation::theme::{
 
 use super::{anim, feed, geometry, popup};
 
+pub(crate) const MAX_VISIBLE: usize = 5;
+
+pub(crate) fn visible_count(n: usize) -> usize {
+    n.min(MAX_VISIBLE)
+}
+
 pub struct NotificationStack {
     stack: feed::Stack,
     exiting: Vec<feed::Exiting>,
@@ -114,7 +120,7 @@ impl gpui::Render for NotificationStack {
             );
         }
 
-        let n = self.stack.notices.len().min(5);
+        let n = visible_count(self.stack.notices.len());
         let card_h = CARD_H;
 
         let exiting_alive: Vec<&feed::Exiting> =
@@ -166,7 +172,7 @@ impl gpui::Render for NotificationStack {
                 self.stack
                     .notices
                     .iter()
-                    .take(5)
+                    .take(MAX_VISIBLE)
                     .enumerate()
                     .rev()
                     .map(move |(i, notice)| {
@@ -285,4 +291,25 @@ pub fn open_window(cx: &mut gpui::App, queue: Queue) -> anyhow::Result<()> {
         move |_, cx| cx.new(|cx| NotificationStack::new(cx, queue)),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::queue::KEEP;
+
+    #[test]
+    fn visible_count_pins_cap() {
+        assert_eq!(MAX_VISIBLE, 5);
+        assert_eq!(visible_count(0), 0);
+        assert_eq!(visible_count(1), 1);
+        assert_eq!(visible_count(5), 5);
+        assert_eq!(visible_count(6), 5);
+        assert_eq!(visible_count(12), 5);
+    }
+
+    #[test]
+    fn visible_count_caps_full_queue() {
+        assert_eq!(visible_count(KEEP), MAX_VISIBLE);
+    }
 }
