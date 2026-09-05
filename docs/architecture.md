@@ -21,15 +21,19 @@ Guards in CI (must print nothing):
 
 ## Layers
 
-- **domain** (`notice.rs`, `queue.rs`, `ids.rs`, `close.rs`) — pure entities:
-  notification, bounded queue (`KEEP=12`), id allocation, close reasons.
-  No I/O, no logging.
-- **application** (`policy.rs`, `commands.rs`, `clock.rs`) — use cases:
-  expiry policy (default 5s), queue commands, monotonic clock. No I/O.
-- **infrastructure/dbus** (`daemon.rs`, `host.rs`, `validation.rs`,
+- **domain** (`notice.rs`, `queue.rs`, `ids.rs`, `close.rs`, `history.rs`) — pure entities:
+  notification, bounded queue (`KEEP=12`), id allocation, close reasons,
+  bounded history (`HISTORY_KEEP=100`, own `seq` ids) plus shared
+  manual-DND / center-open flags. No I/O, no logging.
+- **application** (`policy.rs`, `commands.rs`, `clock.rs`, `cli.rs`) — use cases:
+  expiry policy (default 5s), queue commands, history query/clear/search,
+  DND and center toggles, CLI arg parsing, monotonic clock. No I/O.
+- **infrastructure/dbus** (`daemon.rs`, `host.rs`, `control.rs`, `validation.rs`,
   `markup.rs`) — `org.freedesktop.Notifications` adapter: validates and
   truncates payloads, strips markup, owns the bus name, flushes lifecycle
-  events every 100ms.
+  events every 100ms. `control.rs` serves the separate `com.nobody.Control`
+  interface (`/com/nobody/Control`) and holds the blocking client used by
+  the CLI commands (no GUI init).
 - **infrastructure/icons** (`resolver.rs`, `lookup.rs`, `desktop.rs`,
   `cache.rs`) — icon lookup scoped to known locations (name, hint,
   desktop-entry).
@@ -53,6 +57,9 @@ emits.
 |---|---|
 | Timeout/expiry rule | `application/policy.rs` |
 | Queue orchestration | `application/commands.rs` |
+| History query/clear/search, DND/center toggles | `application/commands.rs` |
+| CLI arg parsing | `application/cli.rs` (`main.rs` stays bootstrap) |
+| Control interface + CLI client | `infrastructure/dbus/control.rs` |
 | Entity, id, close reason | `domain/` |
 | D-Bus validation, markup | `infrastructure/dbus/` |
 | Icon lookup | `infrastructure/icons/` |

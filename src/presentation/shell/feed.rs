@@ -14,6 +14,19 @@ pub struct Exiting {
     pub y: f32,
 }
 
+pub fn sync_snapshot(
+    stack: &mut Stack,
+    exiting: &mut Vec<Exiting>,
+    snapshot: Vec<Notice>,
+    quiet: bool,
+) -> bool {
+    let changed = apply_snapshot(stack, exiting, snapshot);
+    if quiet {
+        exiting.clear();
+    }
+    changed
+}
+
 pub fn apply_snapshot(
     stack: &mut Stack,
     exiting: &mut Vec<Exiting>,
@@ -60,6 +73,27 @@ mod tests {
             expire_ms: 0,
             arrived_at_ms: 0,
         }
+    }
+
+    #[test]
+    fn quiet_expiration_does_not_leave_cards_to_reappear() {
+        let mut stack = Stack { notices: vec![mk(1, "A")] };
+        let mut exiting = Vec::new();
+        assert!(sync_snapshot(&mut stack, &mut exiting, vec![], true));
+        assert!(stack.notices.is_empty());
+        assert!(exiting.is_empty());
+        assert!(!sync_snapshot(&mut stack, &mut exiting, vec![], false));
+        assert!(exiting.is_empty());
+    }
+
+    #[test]
+    fn entering_quiet_mode_clears_existing_exit_animation() {
+        let mut stack = Stack { notices: vec![mk(1, "A")] };
+        let mut exiting = Vec::new();
+        sync_snapshot(&mut stack, &mut exiting, vec![], false);
+        assert_eq!(exiting.len(), 1);
+        sync_snapshot(&mut stack, &mut exiting, vec![], true);
+        assert!(exiting.is_empty());
     }
 
     #[test]

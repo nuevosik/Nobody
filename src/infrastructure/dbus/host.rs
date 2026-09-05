@@ -3,6 +3,7 @@ use zbus::fdo::RequestNameReply;
 use crate::application::{clock, commands};
 use crate::domain::close::CloseReason;
 use crate::domain::queue::Queue;
+use crate::infrastructure::dbus::control::{CONTROL_PATH, ControlService};
 use crate::infrastructure::dbus::daemon::{self, NOTIFICATION_PATH, NotificationDaemon};
 
 pub async fn serve(queue: Queue) -> Option<zbus::Connection> {
@@ -19,6 +20,12 @@ pub async fn serve(queue: Queue) -> Option<zbus::Connection> {
     let daemon = NotificationDaemon { queue: queue.clone() };
     if let Err(e) = conn.object_server().at(NOTIFICATION_PATH, daemon).await {
         eprintln!("nobody: register interface: {e}");
+        return None;
+    }
+
+    let control = ControlService { queue: queue.clone() };
+    if let Err(e) = conn.object_server().at(CONTROL_PATH, control).await {
+        eprintln!("nobody: register control interface: {e}");
         return None;
     }
 

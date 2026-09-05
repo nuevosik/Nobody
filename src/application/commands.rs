@@ -1,4 +1,5 @@
 use crate::domain::close::CloseReason;
+use crate::domain::history::HistoryEntry;
 use crate::domain::notice::Notice;
 use crate::domain::queue::Queue;
 
@@ -16,6 +17,60 @@ pub fn request_dismissal(queue: &Queue, id: u32) {
 
 pub fn quiet_mode(queue: &Queue) -> bool {
     queue.is_quiet()
+}
+
+pub fn history(queue: &Queue) -> Vec<HistoryEntry> {
+    queue.history_snapshot()
+}
+
+pub fn clear_history(queue: &Queue) {
+    queue.clear_history();
+}
+
+/// Busca local por aplicativo, título ou corpo, sem distinguir maiúsculas.
+/// Consulta vazia retorna tudo.
+pub fn filter_history(entries: &[HistoryEntry], query: &str) -> Vec<HistoryEntry> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return entries.to_vec();
+    }
+    entries
+        .iter()
+        .filter(|e| {
+            e.notice.app.to_lowercase().contains(&q)
+                || e.notice.summary.to_lowercase().contains(&q)
+                || e.notice.body.to_lowercase().contains(&q)
+        })
+        .cloned()
+        .collect()
+}
+
+pub fn manual_quiet(queue: &Queue) -> bool {
+    queue.is_manual_quiet()
+}
+
+pub fn set_manual_quiet(queue: &Queue, quiet: bool) {
+    queue.set_manual_quiet(quiet);
+}
+
+pub fn toggle_manual_quiet(queue: &Queue) -> bool {
+    queue.toggle_manual_quiet()
+}
+
+pub fn effective_quiet(queue: &Queue) -> bool {
+    queue.is_effective_quiet()
+}
+
+pub fn center_open(queue: &Queue) -> bool {
+    queue.is_center_open()
+}
+
+pub fn set_center_open(queue: &Queue, open: bool) {
+    queue.set_center_open(open);
+}
+
+pub fn toggle_center(queue: &Queue) -> bool {
+    queue.toggle_center_open()
 }
 
 #[cfg(test)]
@@ -68,5 +123,66 @@ mod tests {
         assert!(quiet_mode(&queue));
         queue.set_quiet(false);
         assert!(!quiet_mode(&queue));
+    }
+
+    #[test]
+    fn effective_quiet_is_manual_or_auto() {
+        let queue = Queue::new();
+        for (manual, auto) in [(false, false), (true, false), (false, true), (true, true)] {
+            set_manual_quiet(&queue, manual);
+            queue.set_quiet(auto);
+            assert_eq!(manual_quiet(&queue), manual);
+            assert_eq!(effective_quiet(&queue), manual || auto);
+        }
+        set_manual_quiet(&queue, false);
+        assert!(toggle_manual_quiet(&queue));
+        assert!(!toggle_manual_quiet(&queue));
+    }
+
+    #[test]
+    fn center_toggle_passthrough() {
+        let queue = Queue::new();
+        assert!(!center_open(&queue));
+        assert!(toggle_center(&queue));
+        set_center_open(&queue, false);
+        assert!(!center_open(&queue));
+    }
+
+    fn history_entry(app: &str, summary: &str, body: &str) -> HistoryEntry {
+        use crate::domain::notice::Notice;
+        HistoryEntry {
+            seq: 0,
+            notice: Notice {
+                id: 1,
+                app: app.into(),
+                summary: summary.into(),
+                body: body.into(),
+                icon: None,
+                actions: vec![],
+                expire_ms: 0,
+                arrived_at_ms: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn filter_finds_all_three_fields_case_insensitive() {
+        let entries = vec![
+            history_entry("Firefox", "t", "b"),
+            history_entry("a", "Atualização pronta", "b"),
+            history_entry("a", "t", "CORPO com Token"),
+        ];
+        assert_eq!(filter_history(&entries, "fire").len(), 1);
+        assert_eq!(filter_history(&entries, "FIREFOX").len(), 1);
+        assert_eq!(filter_history(&entries, "atualização").len(), 1);
+        assert_eq!(filter_history(&entries, "token").len(), 1);
+        assert!(filter_history(&entries, "ausente").is_empty());
+    }
+
+    #[test]
+    fn filter_empty_query_returns_everything() {
+        let entries = vec![history_entry("A", "t", "b"), history_entry("B", "t", "b")];
+        assert_eq!(filter_history(&entries, "").len(), 2);
+        assert_eq!(filter_history(&entries, "   ").len(), 2);
     }
 }

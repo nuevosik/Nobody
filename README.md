@@ -55,6 +55,26 @@ usual GPUI/Linux packages (`libwayland`, `libxkbcommon`, Vulkan).
 - Spotify notifications show the current album cover (via MPRIS + `curl`),
   cached under `~/.cache/nobody/covers/`.
 
+### Central e Não Perturbe
+
+```sh
+nobody              # inicia o daemon, como sempre
+nobody center toggle
+nobody dnd on | off | toggle
+nobody dnd status   # mostra manual, tela cheia e efetivo
+```
+
+- A central lista as últimas 100 notificações da sessão (mais recentes
+  primeiro), com busca por aplicativo, título ou corpo, botão de limpar e
+  controle de Não Perturbe. Escape fecha; expirar ou dispensar um popup
+  preserva o registro; limpar preserva a fila ativa.
+- Silêncio efetivo = manual OU tela cheia. O detector de tela cheia nunca
+  sobrescreve a preferência manual; ao sair do silêncio, só aparecem
+  notificações ainda ativas (o histórico não é reproduzido).
+- Limitação desta entrega: histórico apenas em memória — sem banco,
+  persistência, exportação, ações de aplicativos ou novas bibliotecas.
+  Reiniciar o daemon começa com histórico vazio.
+
 Debug:
 
 | env | effect |

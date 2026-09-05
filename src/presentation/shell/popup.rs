@@ -61,11 +61,32 @@ pub fn badge(icon: Option<&std::path::PathBuf>, app: &str) -> gpui::Div {
 
 const BADGE_PX: u32 = 64;
 
-static RASTER: LazyLock<Mutex<HashMap<PathBuf, Option<Arc<gpui::RenderImage>>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+const RASTER_CACHE_LIMIT: usize = 256;
+
+#[derive(Default)]
+struct RasterCache {
+    images: HashMap<PathBuf, Option<Arc<gpui::RenderImage>>>,
+    order: std::collections::VecDeque<PathBuf>,
+}
+
+impl RasterCache {
+    fn insert(&mut self, path: PathBuf, image: Option<Arc<gpui::RenderImage>>) {
+        if !self.images.contains_key(&path) {
+            if self.images.len() >= RASTER_CACHE_LIMIT
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.images.remove(&oldest);
+            }
+            self.order.push_back(path.clone());
+        }
+        self.images.insert(path, image);
+    }
+}
+
+static RASTER: LazyLock<Mutex<RasterCache>> = LazyLock::new(|| Mutex::new(RasterCache::default()));
 
 fn icon_image(path: &Path) -> Option<Arc<gpui::RenderImage>> {
-    if let Some(hit) = RASTER.lock().unwrap_or_else(|e| e.into_inner()).get(path).cloned() {
+    if let Some(hit) = RASTER.lock().unwrap_or_else(|e| e.into_inner()).images.get(path).cloned() {
         return hit;
     }
     let found = decode_badge_icon(path);
@@ -154,6 +175,27 @@ pub fn a11y_label(notice: &Notice) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raster_cache_evicts_oldest_and_releases_image() {
+        let mut cache = RasterCache::default();
+        let rendered = bgra_render(image::RgbaImage::new(64, 64)).unwrap();
+        let weak = Arc::downgrade(&rendered);
+        let first = PathBuf::from("first.png");
+        cache.insert(first.clone(), Some(rendered));
+        for i in 0..RASTER_CACHE_LIMIT - 1 {
+            cache.insert(PathBuf::from(format!("{i}.png")), None);
+        }
+        assert!(weak.upgrade().is_some());
+        cache.insert(PathBuf::from("new.png"), None);
+        assert_eq!(cache.images.len(), RASTER_CACHE_LIMIT);
+        assert!(!cache.images.contains_key(&first));
+        assert!(weak.upgrade().is_none());
+        for _ in 0..10 {
+            cache.insert(PathBuf::from("new.png"), None);
+        }
+        assert_eq!(cache.order.len(), RASTER_CACHE_LIMIT);
+    }
 
     #[test]
     fn badge_icon_is_prerastered_at_display_size() {

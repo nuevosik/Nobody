@@ -1,3 +1,4 @@
+pub mod control;
 pub mod daemon;
 pub mod host;
 pub mod markup;
