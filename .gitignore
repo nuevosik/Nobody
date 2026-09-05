@@ -14,5 +14,6 @@ dist/
 sha256sums.txt
 .agents/
 .claude/
+.opencode/
 skills-lock.json
 .DS_Store

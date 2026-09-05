@@ -1,29 +1,59 @@
 # Nobody
 
-Notification daemon for Wayland, written in Rust. Owns
-`org.freedesktop.Notifications` on the session bus and renders notifications
-top-right in a GPUI layer-shell window.
+A Wayland notification daemon. It owns `org.freedesktop.Notifications` on the
+session bus and renders notifications top-right in a layer-shell window.
 
-## Run
+Built with [GPUI](https://github.com/zed-industries/zed) and zbus. No GTK, no
+`notify-osd` fork.
 
-Needs a Wayland session with Layer Shell and a D-Bus session bus. Stop any
-daemon already owning the name (e.g. mako):
+## Install
 
-```bash
+```sh
+curl -fsSL https://github.com/nuevosik/Nobody/releases/latest/download/install.sh | sh
+```
+
+That drops `nobody` in `~/.local/bin`. Override the destination with
+`NOBODY_INSTALL_DIR`.
+
+### Compositor
+
+Stop any daemon already owning the name (e.g. mako), start nobody:
+
+```conf
+exec-once = pkill mako; nobody
+```
+
+Make sure `~/.local/bin` is on `PATH` for the compositor.
+
+### From source
+
+```sh
+git clone https://github.com/nuevosik/Nobody
+cd Nobody
 cargo run --release
 ```
 
-Click, Enter, Space or Escape dismisses a notification.
-`PREFERS_REDUCED_MOTION=1` disables animations.
+Needs a Wayland session with Layer Shell, a D-Bus session bus, Rust, and the
+usual GPUI/Linux packages (`libwayland`, `libxkbcommon`, Vulkan).
+
+## Use
+
+- Click, Enter, Space or Escape dismisses a notification.
+- Keeps 12 notifications, renders the 5 most recent.
+- Timeout: `-1` means server default (5s), `0` never expires; critical
+  notifications never auto-expire.
+
+Debug:
+
+| env | effect |
+| --- | --- |
+| `PREFERS_REDUCED_MOTION=1` | disables animations |
 
 ## Behavior
 
 - `Notify`, `CloseNotification`, `GetCapabilities`, `GetServerInformation`;
   emits `NotificationClosed`.
-- Keeps 12 notifications, renders the 5 most recent; `replaces_id` replaces
-  atomically.
-- Timeout: `-1` means server default (5s), `0` never expires; critical
-  notifications never auto-expire.
+- `replaces_id` replaces atomically.
 - Icon path/name plus `desktop-entry` lookup scoped to known locations;
   markup is stripped. No actions, `image-data` or persistence.
 
@@ -45,3 +75,13 @@ cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
+
+## Release
+
+```sh
+./scripts/release.sh 0.1.1
+```
+
+Bumps `Cargo.toml`, tags `v0.1.1`, pushes. GitHub Actions builds
+`nobody-<triple>.tar.gz` and attaches it to the release, which is what
+`install.sh` downloads.
