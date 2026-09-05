@@ -26,12 +26,17 @@ pub fn badge(icon: Option<&std::path::PathBuf>, app: &str) -> gpui::Div {
 
     if let Some(path) = icon {
         if let Some(rendered) = icon_image(path) {
-            return base.child(img(rendered).size(px(32.)).object_fit(gpui::ObjectFit::Cover));
+            return base.child(
+                img(rendered).size(px(32.)).rounded(px(8.)).object_fit(gpui::ObjectFit::Cover),
+            );
         }
         let initial = badge_initial(app);
         base.child(
-            img(path.clone()).size(px(32.)).object_fit(gpui::ObjectFit::Cover).with_fallback(
-                move || {
+            img(path.clone())
+                .size(px(32.))
+                .rounded(px(8.))
+                .object_fit(gpui::ObjectFit::Cover)
+                .with_fallback(move || {
                     div()
                         .size(px(32.))
                         .flex()
@@ -42,8 +47,7 @@ pub fn badge(icon: Option<&std::path::PathBuf>, app: &str) -> gpui::Div {
                         .text_color(fade(MUTED, 1.))
                         .child(initial.clone())
                         .into_any_element()
-                },
-            ),
+                }),
         )
     } else {
         let initial = badge_initial(app);

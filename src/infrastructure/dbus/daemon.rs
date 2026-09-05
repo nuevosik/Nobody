@@ -65,9 +65,11 @@ impl NotificationDaemon {
         let icon_app = app.clone();
         let icon_str = app_icon_trunc.clone();
         let hints_clone = hints_limited.clone();
-        let icon =
-            blocking::unblock(move || resolve_notice_icon(&icon_str, &icon_app, &hints_clone))
-                .await;
+        let icon = blocking::unblock(move || {
+            crate::infrastructure::spotify::spotify_cover(&icon_app, &hints_clone)
+                .or_else(|| resolve_notice_icon(&icon_str, &icon_app, &hints_clone))
+        })
+        .await;
 
         let notice = Notice {
             id: 0,
