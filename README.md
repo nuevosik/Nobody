@@ -6,6 +6,12 @@ session bus and renders notifications top-right in a layer-shell window.
 Built with [GPUI](https://github.com/zed-industries/zed) and zbus. No GTK, no
 `notify-osd` fork.
 
+## Preview
+
+Spotify notification with album cover, plain notification with app initial:
+
+![Spotify cover + plain notification](docs/spotify-cover.png)
+
 ## Install
 
 ```sh
