@@ -42,6 +42,8 @@ usual GPUI/Linux packages (`libwayland`, `libxkbcommon`, Vulkan).
 - Keeps 12 notifications, renders the 5 most recent.
 - Timeout: `-1` means server default (5s), `0` never expires; critical
   notifications never auto-expire.
+- Spotify notifications show the current album cover (via MPRIS + `curl`),
+  cached under `~/.cache/nobody/covers/`.
 
 Debug:
 
