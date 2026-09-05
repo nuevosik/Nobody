@@ -7,6 +7,10 @@ pub fn ease_out_cubic(t: f32) -> f32 {
     1. - (1. - t).powi(3)
 }
 
+pub fn ease_in_cubic(t: f32) -> f32 {
+    t.powi(3)
+}
+
 pub fn enter_progress(arrived_at_ms: u128) -> f32 {
     let elapsed = clock::elapsed_ms(arrived_at_ms) as f32 / ENTER_MS as f32;
     ease_out_cubic(elapsed.clamp(0., 1.))
@@ -14,7 +18,7 @@ pub fn enter_progress(arrived_at_ms: u128) -> f32 {
 
 pub fn exit_progress(start_ms: u128) -> f32 {
     let elapsed = clock::elapsed_ms(start_ms) as f32 / EXIT_MS as f32;
-    ease_out_cubic(elapsed.clamp(0., 1.))
+    ease_in_cubic(elapsed.clamp(0., 1.))
 }
 
 fn is_truthy(v: &str) -> bool {
@@ -109,6 +113,19 @@ mod tests {
         assert!((ease_out_cubic(1.) - 1.).abs() < 1e-6);
         let m = ease_out_cubic(0.5);
         assert!(m > 0.5 && m < 1., "ease-out deve acelerar no início");
+    }
+
+    #[test]
+    fn exit_mirrors_enter_easing() {
+        assert!((ease_in_cubic(0.)).abs() < 1e-6);
+        assert!((ease_in_cubic(1.) - 1.).abs() < 1e-6);
+        for t in [0.25, 0.5, 0.75] {
+            let mirrored = 1. - ease_out_cubic(1. - t);
+            assert!(
+                (ease_in_cubic(t) - mirrored).abs() < 1e-6,
+                "exit deve espelhar o enter em t={t}"
+            );
+        }
     }
 
     #[test]
