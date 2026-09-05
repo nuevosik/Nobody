@@ -204,11 +204,11 @@ mod tests {
         let n = notices.len();
         let y_map = grouped_y_map(&notices);
         assert_eq!(y_map.len(), 3);
-        assert!((y_map[0] - 46.).abs() < 0.01);
-        assert!((y_map[1] - 170.).abs() < 0.01);
-        assert!((y_map[2] - 108.).abs() < 0.01);
+        assert!((y_map[0] - STACK_TOP).abs() < 0.01);
+        assert!((y_map[1] - (STACK_TOP + 2. * STRIDE)).abs() < 0.01);
+        assert!((y_map[2] - (STACK_TOP + STRIDE)).abs() < 0.01);
         let got = total_h_current_for(&notices, n);
-        assert!((got - 224.).abs() < 0.01, "total_h deve ser 224, foi {got}");
+        assert!((got - (STACK_TOP + 2. * STRIDE + CARD_H)).abs() < 0.01);
     }
 
     #[test]

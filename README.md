@@ -75,6 +75,38 @@ nobody dnd status   # mostra manual, tela cheia e efetivo
   persistência, exportação, ações de aplicativos ou novas bibliotecas.
   Reiniciar o daemon começa com histórico vazio.
 
+### Waybar
+
+With Nobody installed in `~/.local/bin`, run from this checkout:
+
+```sh
+install -Dm644 assets/nobody-badge.png "$HOME/.local/share/nobody/nobody-badge.png"
+```
+
+Add `"image#nobody"` to `modules-right` in your Waybar configuration, then
+add this module at the top level:
+
+```json
+"image#nobody": {
+    "exec": "printf '%s\\n' \"$HOME/.local/share/nobody/nobody-badge.png\" 'Central de notificações'",
+    "size": 16,
+    "interval": 3600,
+    "on-click": "\"$HOME/.local/bin/nobody\" center toggle",
+    "tooltip": true
+}
+```
+
+Add to Waybar's `style.css`:
+
+```css
+#image.nobody { padding: 0 8px; }
+#image.nobody:hover { background: rgba(255, 255, 255, 0.10); }
+```
+
+Restart Waybar to load the module. Clicking the icon toggles the central.
+If Nobody was installed elsewhere, adjust `on-click` to that binary.
+This setup is optional; the installer does not modify your Waybar configuration.
+
 Debug:
 
 | env | effect |

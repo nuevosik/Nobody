@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 /// Texto do botão de Não Perturbe + nota de tela cheia.
 pub fn dnd_button_label(manual: bool) -> &'static str {
     if manual { "Não Perturbe: on" } else { "Não Perturbe: off" }
@@ -74,6 +76,109 @@ pub fn dnd_state_changed(prev: (bool, bool), next: (bool, bool)) -> bool {
     prev != next
 }
 
+pub fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn floor_char_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+pub fn utf8_range_for_utf16(text: &str, range: Range<usize>) -> Range<usize> {
+    let total = utf16_len(text);
+    let start16 = range.start.min(total);
+    let end16 = range.end.min(total).max(start16);
+    let mut start8 = 0;
+    let mut end8 = 0;
+    let mut count = 0;
+    // Round split surrogate pairs down, matching utf16_range_for_utf8.
+    for (byte, ch) in text.char_indices().chain(std::iter::once((text.len(), '\0'))) {
+        if count > end16 {
+            break;
+        }
+        if count <= start16 {
+            start8 = byte;
+        }
+        end8 = byte;
+        count += ch.len_utf16();
+    }
+    start8..end8
+}
+
+pub fn utf16_range_for_utf8(text: &str, range: Range<usize>) -> Range<usize> {
+    let start8 = floor_char_boundary(text, range.start);
+    let end8 = floor_char_boundary(text, range.end).max(start8);
+    let total = utf16_len(text);
+    let mut start16 = total;
+    let mut end16 = total;
+    let mut count = 0;
+    for (byte, ch) in text.char_indices() {
+        if byte == start8 {
+            start16 = count;
+        }
+        if byte == end8 {
+            end16 = count;
+            break;
+        }
+        count += ch.len_utf16();
+    }
+    start16.min(end16)..end16
+}
+
+pub fn sanitize_ime_text(text: &str) -> String {
+    text.replace('\n', " ")
+}
+
+pub fn ime_replace(
+    query: &mut String,
+    marked: &mut Option<Range<usize>>,
+    range_utf16: Option<Range<usize>>,
+    text: &str,
+) {
+    let range = match range_utf16 {
+        Some(range) => utf8_range_for_utf16(query, range),
+        None => marked.clone().unwrap_or(query.len()..query.len()),
+    };
+    query.replace_range(range, &sanitize_ime_text(text));
+    *marked = None;
+}
+
+pub fn ime_mark(
+    query: &mut String,
+    marked: &mut Option<Range<usize>>,
+    range_utf16: Option<Range<usize>>,
+    text: &str,
+) {
+    let range = match range_utf16 {
+        Some(range) => utf8_range_for_utf16(query, range),
+        None => marked.clone().unwrap_or(query.len()..query.len()),
+    };
+    let inserted = sanitize_ime_text(text);
+    let start = range.start;
+    query.replace_range(range, &inserted);
+    *marked = Some(start..start + inserted.len());
+}
+
+pub fn ime_unmark(marked: &mut Option<Range<usize>>) {
+    *marked = None;
+}
+
+pub fn drop_marked(query: &mut String, marked: &mut Option<Range<usize>>) -> bool {
+    match marked.take() {
+        Some(range) => {
+            let end = floor_char_boundary(query, range.end);
+            let start = floor_char_boundary(query, range.start).min(end);
+            query.replace_range(start..end, "");
+            true
+        }
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +228,69 @@ mod tests {
         assert!(!apply_search_edit(&mut q, &SearchKeyAction::Backspace));
         assert!(!apply_search_edit(&mut q, &SearchKeyAction::Ignore));
         assert!(!apply_search_edit(&mut q, &SearchKeyAction::Paste));
+    }
+
+    #[test]
+    fn ime_utf16_ranges_round_trip() {
+        let text = "aéb中";
+        assert_eq!(utf16_len(text), 4);
+        assert_eq!(utf8_range_for_utf16(text, 0..4), 0..text.len());
+        assert_eq!(utf8_range_for_utf16(text, 1..2), 1..3);
+        assert_eq!(utf8_range_for_utf16(text, 3..4), 4..text.len());
+        assert_eq!(utf8_range_for_utf16(text, 4..4), text.len()..text.len());
+        assert_eq!(utf8_range_for_utf16(text, 9..12), text.len()..text.len());
+        assert_eq!(utf16_range_for_utf8(text, 1..3), 1..2);
+        assert_eq!(utf16_range_for_utf8(text, 0..0), 0..0);
+        assert_eq!(utf16_range_for_utf8(text, 7..7), 4..4);
+        assert_eq!(utf8_range_for_utf16("", 0..0), 0..0);
+    }
+
+    #[test]
+    fn ime_surrogate_boundaries_preserve_following_text() {
+        let text = "a😀b";
+        assert_eq!(utf8_range_for_utf16(text, 1..2), 1..1);
+        assert_eq!(utf8_range_for_utf16(text, 2..2), 1..1);
+        assert_eq!(utf8_range_for_utf16(text, 2..3), 1..5);
+        assert_eq!(utf8_range_for_utf16(text, 1..3), 1..5);
+        assert_eq!(utf8_range_for_utf16(text, 3..4), 5..6);
+        let mut query = text.to_string();
+        ime_replace(&mut query, &mut None, Some(1..2), "X");
+        assert_eq!(query, "aX😀b");
+        let mut query = text.to_string();
+        ime_replace(&mut query, &mut None, Some(1..3), "X");
+        assert_eq!(query, "aXb");
+    }
+
+    #[test]
+    fn ime_replace_mark_lifecycle() {
+        let mut query = String::from("ab");
+        let mut marked = None;
+        ime_mark(&mut query, &mut marked, None, "´");
+        assert_eq!(query, "ab´");
+        assert_eq!(marked, Some(2..4));
+        ime_replace(&mut query, &mut marked, None, "á");
+        assert_eq!(query, "abá");
+        assert_eq!(marked, None);
+        ime_replace(&mut query, &mut marked, Some(0..1), "中");
+        assert_eq!(query, "中bá");
+        ime_mark(&mut query, &mut marked, Some(0..1), "x");
+        assert_eq!(query, "xbá");
+        assert_eq!(marked, Some(0..1));
+        assert_eq!(utf16_range_for_utf8(&query, marked.clone().unwrap()), 0..1);
+        ime_unmark(&mut marked);
+        assert_eq!(marked, None);
+        assert_eq!(query, "xbá");
+        assert!(!drop_marked(&mut query, &mut marked));
+        marked = Some(0..1);
+        assert!(drop_marked(&mut query, &mut marked));
+        assert_eq!(query, "bá");
+        assert_eq!(marked, None);
+        marked = Some(0..99);
+        assert!(drop_marked(&mut query, &mut marked));
+        assert_eq!(query, "");
+        let mut spaced = String::from("a\nb");
+        ime_replace(&mut spaced, &mut None, None, "x\ny");
+        assert_eq!(spaced, "a\nbx y");
     }
 
     #[test]

@@ -5,7 +5,7 @@ pub const CARD_H: f32 = 54.;
 pub const CARD_GAP: f32 = 8.;
 pub const MARGIN: f32 = 12.;
 pub const POPUP_W: f32 = 320.;
-pub const STACK_TOP: f32 = 46.;
+pub const STACK_TOP: f32 = MARGIN;
 pub const QUIET_BADGE: f32 = 28.;
 
 pub const FONT: &str = "SF Pro Display";

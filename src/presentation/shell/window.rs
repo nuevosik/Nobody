@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::time::Duration;
 
 use gpui::accesskit::Role;
@@ -30,6 +31,7 @@ pub struct NotificationStack {
     quiet: bool,
     center_open: bool,
     center_query: String,
+    center_marked: Option<Range<usize>>,
     search_focus: gpui::FocusHandle,
     center_focus_armed: bool,
     dnd_manual: bool,
@@ -70,6 +72,7 @@ impl NotificationStack {
             quiet: false,
             center_open: false,
             center_query: String::new(),
+            center_marked: None,
             search_focus: cx.focus_handle().tab_stop(true).tab_index(3),
             center_focus_armed: false,
             dnd_manual: false,
@@ -275,8 +278,8 @@ impl NotificationStack {
                         .child(center::fullscreen_note(manual, auto).unwrap_or("")),
                 )
             })
-            .child(
-                div()
+            .child(ImeField {
+                inner: div()
                     .id("center-search")
                     .track_focus(&self.search_focus)
                     .role(Role::SearchInput)
@@ -321,20 +324,44 @@ impl NotificationStack {
                                     cx.notify();
                                 }
                                 center::SearchKeyAction::Paste => {
+                                    let mut changed = center::drop_marked(
+                                        &mut stack.center_query,
+                                        &mut stack.center_marked,
+                                    );
                                     if let Some(text) =
                                         cx.read_from_clipboard().and_then(|item| item.text())
                                     {
                                         let text = text.replace('\n', " ");
                                         if !text.is_empty() {
                                             stack.center_query.push_str(&text);
+                                            changed = true;
                                             cx.stop_propagation();
-                                            cx.notify();
                                         }
                                     }
+                                    if changed {
+                                        cx.notify();
+                                    }
                                 }
-                                center::SearchKeyAction::InsertChar(_)
-                                | center::SearchKeyAction::Backspace => {
+                                center::SearchKeyAction::InsertChar(_) => {
+                                    center::drop_marked(
+                                        &mut stack.center_query,
+                                        &mut stack.center_marked,
+                                    );
                                     if center::apply_search_edit(&mut stack.center_query, &action) {
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }
+                                }
+                                center::SearchKeyAction::Backspace => {
+                                    let changed = if center::drop_marked(
+                                        &mut stack.center_query,
+                                        &mut stack.center_marked,
+                                    ) {
+                                        true
+                                    } else {
+                                        center::apply_search_edit(&mut stack.center_query, &action)
+                                    };
+                                    if changed {
                                         cx.stop_propagation();
                                         cx.notify();
                                     }
@@ -342,8 +369,11 @@ impl NotificationStack {
                                 center::SearchKeyAction::Ignore => {}
                             }
                         },
-                    )),
-            );
+                    ))
+                    .into_any_element(),
+                stack: cx.entity(),
+                focus: self.search_focus.clone(),
+            });
 
         if entries.is_empty() {
             return root.child(
@@ -417,6 +447,189 @@ impl NotificationStack {
                         )
                 })),
         )
+    }
+}
+
+struct ImeField {
+    inner: gpui::AnyElement,
+    stack: gpui::Entity<NotificationStack>,
+    focus: gpui::FocusHandle,
+}
+
+impl gpui::Element for ImeField {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        id: Option<&gpui::GlobalElementId>,
+        inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> (gpui::LayoutId, ()) {
+        <gpui::AnyElement as gpui::Element>::request_layout(
+            &mut self.inner,
+            id,
+            inspector_id,
+            window,
+            cx,
+        )
+    }
+
+    fn prepaint(
+        &mut self,
+        id: Option<&gpui::GlobalElementId>,
+        inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<gpui::Pixels>,
+        request_layout: &mut (),
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        <gpui::AnyElement as gpui::Element>::prepaint(
+            &mut self.inner,
+            id,
+            inspector_id,
+            bounds,
+            request_layout,
+            window,
+            cx,
+        );
+    }
+
+    fn paint(
+        &mut self,
+        id: Option<&gpui::GlobalElementId>,
+        inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<gpui::Pixels>,
+        request_layout: &mut (),
+        prepaint: &mut (),
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) {
+        <gpui::AnyElement as gpui::Element>::paint(
+            &mut self.inner,
+            id,
+            inspector_id,
+            bounds,
+            request_layout,
+            prepaint,
+            window,
+            cx,
+        );
+        window.handle_input(
+            &self.focus,
+            gpui::ElementInputHandler::new(bounds, self.stack.clone()),
+            cx,
+        );
+    }
+}
+
+impl gpui::IntoElement for ImeField {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl gpui::EntityInputHandler for NotificationStack {
+    fn text_for_range(
+        &mut self,
+        range: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let range = center::utf8_range_for_utf16(&self.center_query, range);
+        *adjusted_range = Some(center::utf16_range_for_utf8(&self.center_query, range.clone()));
+        self.center_query.get(range).map(str::to_owned)
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<gpui::UTF16Selection> {
+        let end = center::utf16_len(&self.center_query);
+        Some(gpui::UTF16Selection { range: end..end, reversed: false })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.center_marked
+            .clone()
+            .map(|range| center::utf16_range_for_utf8(&self.center_query, range))
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        center::ime_unmark(&mut self.center_marked);
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        center::ime_replace(&mut self.center_query, &mut self.center_marked, range, text);
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        center::ime_mark(&mut self.center_query, &mut self.center_marked, range, new_text);
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        element_bounds: Bounds<gpui::Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<gpui::Pixels>> {
+        Some(element_bounds)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<gpui::Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        Some(center::utf16_len(&self.center_query))
+    }
+
+    fn text_length_utf16(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        Some(center::utf16_len(&self.center_query))
+    }
+
+    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        self.center_open
     }
 }
 
@@ -797,7 +1010,7 @@ pub fn open_window(cx: &mut gpui::App, queue: Queue) -> anyhow::Result<()> {
                 namespace: "nobody".to_string(),
                 layer: Layer::Overlay,
                 anchor: Anchor::TOP | Anchor::RIGHT,
-                exclusive_zone: Some(px(-1.)),
+                exclusive_zone: Some(px(0.)),
                 exclusive_edge: None,
                 keyboard_interactivity: KeyboardInteractivity::OnDemand,
                 ..Default::default()
