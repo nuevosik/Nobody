@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use gpui::accesskit::Role;
@@ -26,8 +27,27 @@ pub struct NotificationStack {
     queue: Queue,
     quiet: bool,
     expanded: Option<String>,
+    smooth_y: HashMap<u32, f32>,
+    target_y: HashMap<u32, f32>,
+    shown_at: HashMap<u32, u128>,
+    was_visible: HashSet<u32>,
     last_window_h: Option<f32>,
     last_input_len: usize,
+}
+
+pub(crate) fn step_toward(current: f32, target: f32) -> (f32, bool) {
+    let next = current + (target - current) * 0.3;
+    if (target - next).abs() < 0.5 { (target, true) } else { (next, false) }
+}
+
+pub(crate) fn hover_expand(current: Option<&str>, app: &str, hovered: bool) -> Option<String> {
+    if hovered {
+        if current == Some(app) { current.map(str::to_owned) } else { Some(app.to_owned()) }
+    } else if current == Some(app) {
+        None
+    } else {
+        current.map(str::to_owned)
+    }
 }
 
 impl NotificationStack {
@@ -41,6 +61,10 @@ impl NotificationStack {
             queue,
             quiet: false,
             expanded: None,
+            smooth_y: HashMap::new(),
+            target_y: HashMap::new(),
+            shown_at: HashMap::new(),
+            was_visible: HashSet::new(),
             last_window_h: None,
             last_input_len: usize::MAX,
         }
@@ -61,7 +85,11 @@ fn spawn_anim_ticker(cx: &mut Context<NotificationStack>) {
                     .iter()
                     .any(|n| clock::elapsed_ms(n.arrived_at_ms) < anim::ENTER_MS);
                 let exiting = !stack.exiting.is_empty();
-                entering || exiting
+                let settling = stack
+                    .target_y
+                    .iter()
+                    .any(|(id, t)| stack.smooth_y.get(id).is_some_and(|s| (s - t).abs() >= 0.5));
+                entering || exiting || settling
             }) else {
                 break;
             };
@@ -129,15 +157,54 @@ impl gpui::Render for NotificationStack {
         let exiting_max_y = exiting_alive.iter().map(|e| e.y + card_h).fold(0., f32::max);
         let deck_list = geometry::decks(&self.stack.notices, self.expanded.as_deref());
         let shown = geometry::shown_decks(&deck_list, n);
-        let (y_map, _, deck_h) = geometry::deck_layout(&self.stack.notices, &deck_list, &shown);
-        let total_h_current = deck_h;
+        let (y_map, _, _) = geometry::deck_layout(&self.stack.notices, &deck_list, &shown);
+        let reduced = anim::prefers_reduced_motion();
+        let now = clock::now_ms();
+        let live: HashSet<u32> = self.stack.notices.iter().map(|n| n.id).collect();
+        self.smooth_y.retain(|id, _| live.contains(id));
+        self.target_y.retain(|id, _| live.contains(id));
+        self.shown_at.retain(|id, _| live.contains(id));
+        let mut now_visible: HashSet<u32> = HashSet::new();
+        for s in &shown {
+            for &idx in &s.indices {
+                let id = self.stack.notices[idx].id;
+                now_visible.insert(id);
+                self.target_y.insert(id, y_map[idx]);
+                if !self.was_visible.contains(&id) {
+                    self.shown_at.insert(id, now);
+                }
+                let cur = self.smooth_y.get(&id).copied().unwrap_or(y_map[idx]);
+                let next = if reduced { y_map[idx] } else { step_toward(cur, y_map[idx]).0 };
+                self.smooth_y.insert(id, next);
+            }
+        }
+        self.was_visible = now_visible;
+        let mut total_h_current = 0f32;
+        for s in &shown {
+            let deck = &deck_list[s.deck];
+            for &idx in &s.indices {
+                let id = self.stack.notices[idx].id;
+                let mut top = self.smooth_y.get(&id).copied().unwrap_or(y_map[idx]) + CARD_H;
+                if deck.collapsed && idx == deck.indices[0] {
+                    top += geometry::STACK_PEEK;
+                }
+                total_h_current = total_h_current.max(top);
+            }
+        }
         let total_h = if exiting_alive.is_empty() {
             total_h_current
         } else {
             total_h_current.max(exiting_max_y + CARD_GAP)
         };
-        let cards_y: Vec<f32> =
-            shown.iter().flat_map(|s| s.indices.iter().map(|&i| y_map[i])).collect();
+        let cards_y: Vec<f32> = shown
+            .iter()
+            .flat_map(|s| {
+                s.indices.iter().map(|&i| {
+                    let id = self.stack.notices[i].id;
+                    self.smooth_y.get(&id).copied().unwrap_or(y_map[i])
+                })
+            })
+            .collect();
 
         geometry::sync_window_geometry(
             window,
@@ -153,8 +220,6 @@ impl gpui::Render for NotificationStack {
             .first()
             .map(|n| format!("{}: {} — {}", n.app, n.summary, n.body))
             .unwrap_or_default();
-
-        let reduced = anim::prefers_reduced_motion();
 
         div()
             .size_full()
@@ -184,8 +249,12 @@ impl gpui::Render for NotificationStack {
                 let mut els: Vec<gpui::Stateful<gpui::Div>> = Vec::new();
                 for (k, s) in shown.iter().enumerate().rev() {
                     let deck = &deck_list[s.deck];
-                    let first_y = y_map[s.indices[0]];
-                    let last_y = y_map[*s.indices.last().expect("deck mostrado não é vazio")];
+                    let smooth_at = |idx: usize| {
+                        let id = self.stack.notices[idx].id;
+                        self.smooth_y.get(&id).copied().unwrap_or(y_map[idx])
+                    };
+                    let first_y = smooth_at(s.indices[0]);
+                    let last_y = smooth_at(*s.indices.last().expect("deck mostrado não é vazio"));
                     let mut footprint = last_y - first_y + CARD_H;
                     if deck.collapsed {
                         footprint += geometry::STACK_PEEK;
@@ -199,22 +268,21 @@ impl gpui::Render for NotificationStack {
                         .w(px(POPUP_W))
                         .h(px(footprint))
                         .on_hover(cx.listener(move |stack, hovered: &bool, _, cx| {
-                            if *hovered {
-                                if stack.expanded.as_deref() != Some(expand_app.as_str()) {
-                                    stack.expanded = Some(expand_app.clone());
-                                    cx.notify();
-                                }
-                            } else if stack.expanded.as_deref() == Some(expand_app.as_str()) {
-                                stack.expanded = None;
+                            let next =
+                                hover_expand(stack.expanded.as_deref(), &expand_app, *hovered);
+                            if next != stack.expanded {
+                                stack.expanded = next;
                                 cx.notify();
                             }
                         }));
                     for (m, &idx) in s.indices.iter().enumerate() {
                         let slot = slot_of[k] + m;
-                        let y = y_map[idx] - first_y;
+                        let y = smooth_at(idx) - first_y;
                         let notice = &self.stack.notices[idx];
                         let hidden = if deck.collapsed && m == 0 { deck.hidden_count() } else { 0 };
-                        let t = anim::enter_progress(notice.arrived_at_ms);
+                        let shown_since =
+                            self.shown_at.get(&notice.id).copied().unwrap_or(notice.arrived_at_ms);
+                        let t = anim::enter_progress(shown_since);
                         let slide = if reduced { 0. } else { (1. - t) * (POPUP_W + MARGIN) };
                         if hidden > 0 {
                             container = container.child(ghost_card(y + 5., 8., slide));
@@ -371,6 +439,42 @@ pub fn open_window(cx: &mut gpui::App, queue: Queue) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::domain::queue::KEEP;
+
+    #[test]
+    fn step_toward_glides_and_settles() {
+        let (v, settled) = step_toward(0., 100.);
+        assert!((v - 30.).abs() < 1e-4);
+        assert!(!settled);
+        let (v, settled) = step_toward(99.8, 100.);
+        assert_eq!(v, 100.);
+        assert!(settled);
+        let (v, settled) = step_toward(50., 50.);
+        assert_eq!(v, 50.);
+        assert!(settled);
+    }
+
+    #[test]
+    fn step_toward_moves_down_and_converges() {
+        let (v, settled) = step_toward(100., 0.);
+        assert!((v - 70.).abs() < 1e-4);
+        assert!(!settled);
+        let mut v = 0f32;
+        for _ in 0..200 {
+            let (next, _) = step_toward(v, 100.);
+            v = next;
+        }
+        assert_eq!(v, 100.);
+    }
+
+    #[test]
+    fn hover_expand_pins_state_machine() {
+        assert_eq!(hover_expand(None, "A", true), Some("A".to_owned()));
+        assert_eq!(hover_expand(Some("A"), "A", true), Some("A".to_owned()));
+        assert_eq!(hover_expand(Some("B"), "A", true), Some("A".to_owned()));
+        assert_eq!(hover_expand(Some("A"), "A", false), None);
+        assert_eq!(hover_expand(Some("B"), "A", false), Some("B".to_owned()));
+        assert_eq!(hover_expand(None, "A", false), None);
+    }
 
     #[test]
     fn visible_count_pins_cap() {

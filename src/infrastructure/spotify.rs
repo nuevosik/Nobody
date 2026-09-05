@@ -25,8 +25,6 @@ pub fn is_spotify(app: &str, hints: &HashMap<String, OwnedValue>) -> bool {
     })
 }
 
-/// Cover art for a Spotify notification, or `None` to fall back to icon lookup.
-/// Blocking: call from `blocking::unblock`. Never errors outward.
 pub fn spotify_cover(app: &str, hints: &HashMap<String, OwnedValue>) -> Option<PathBuf> {
     if !is_spotify(app, hints) {
         return None;
@@ -100,7 +98,6 @@ fn cache_path_for(url: &str, ext: &str) -> Option<PathBuf> {
 }
 
 fn cached_download(url: &str) -> Option<PathBuf> {
-    // Probe the cache under likely extensions first (extension unknown until download).
     if let Some(dir) = covers_dir() {
         let mut hasher = DefaultHasher::new();
         url.hash(&mut hasher);

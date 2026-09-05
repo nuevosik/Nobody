@@ -7,7 +7,6 @@ use crate::presentation::theme::{CARD_GAP, CARD_H, MARGIN, POPUP_W, STACK_TOP};
 
 const STRIDE: f32 = CARD_H + CARD_GAP;
 
-/// Extra footprint of a collapsed multi-notice deck (room for the ghost peek).
 pub const STACK_PEEK: f32 = 10.;
 
 pub(crate) fn grouped_y(notices: &[Notice], idx: usize) -> f32 {
@@ -49,8 +48,6 @@ pub fn total_h_current_for(notices: &[Notice], n: usize) -> f32 {
     y_map.iter().take(n).fold(STACK_TOP, |a, &y| a.max(y)) + CARD_H
 }
 
-/// One app's notices in first-seen order. A multi-notice deck is `collapsed`
-/// unless its app is currently expanded (hover).
 pub struct Deck {
     pub app: String,
     pub indices: Vec<usize>,
@@ -83,9 +80,6 @@ pub fn decks(notices: &[Notice], expanded: Option<&str>) -> Vec<Deck> {
         .collect()
 }
 
-/// Collapsed decks show only their most recent notice (`indices[0]`); the rest
-/// sit behind it. Returns y per notice index, visibility per index, and total
-/// window height for the `shown` decks only.
 pub fn deck_layout(
     notices: &[Notice],
     decks: &[Deck],
@@ -132,8 +126,6 @@ pub fn deck_layout(
     (y_map, visible, total_h)
 }
 
-/// A deck clipped to the slot budget: collapsed/single decks cost 1 slot,
-/// expanded decks cost up to their member count (partial when it doesn't fit).
 pub struct ShownDeck {
     pub deck: usize,
     pub indices: Vec<usize>,
@@ -310,5 +302,27 @@ mod tests {
         let ds = decks(&notices, None);
         let (_, _, total) = deck_layout(&notices, &ds, &[]);
         assert_eq!(total, 0.);
+    }
+
+    #[test]
+    fn deck_beyond_budget_does_not_leak_into_total() {
+        let notices = vec![mk(1, "A"), mk(2, "A"), mk(3, "B")];
+        let ds = decks(&notices, None);
+        let shown = shown_decks(&ds, 1);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].deck, 0);
+        let (y, vis, total) = deck_layout(&notices, &ds, &shown);
+        assert!(vis[0] && !vis[1] && !vis[2]);
+        assert!((total - (y[0] + CARD_H + STACK_PEEK)).abs() < 0.01);
+    }
+
+    #[test]
+    fn collapsed_count_survives_slot_budget() {
+        let notices = vec![mk(1, "A"), mk(2, "A"), mk(3, "A"), mk(4, "A")];
+        let ds = decks(&notices, None);
+        assert_eq!(ds[0].hidden_count(), 3);
+        let shown = shown_decks(&ds, 5);
+        let (_, vis, _) = deck_layout(&notices, &ds, &shown);
+        assert_eq!(vis.iter().filter(|v| **v).count(), 1);
     }
 }
