@@ -12,6 +12,10 @@ Spotify notification with the current album cover:
 
 ![Spotify notification with album cover](docs/spotify-cover.png)
 
+Notification center with search, Do Not Disturb and Waybar integration:
+
+![Nobody notification center with an empty inbox](docs/notification-center.png)
+
 ## Install
 
 ```sh
