@@ -98,10 +98,11 @@ pub fn deck_layout(
             continue;
         }
         if deck.collapsed {
-            let top = deck.indices[0];
-            y_map[top] = cursor;
+            for &idx in &deck.indices {
+                y_map[idx] = cursor;
+            }
             if in_shown[d] {
-                visible[top] = true;
+                visible[deck.indices[0]] = true;
                 total_h = total_h.max(cursor + CARD_H + STACK_PEEK);
             }
             cursor += CARD_H + STACK_PEEK + CARD_GAP;
@@ -324,5 +325,126 @@ mod tests {
         let shown = shown_decks(&ds, 5);
         let (_, vis, _) = deck_layout(&notices, &ds, &shown);
         assert_eq!(vis.iter().filter(|v| **v).count(), 1);
+    }
+
+    struct XorShift32 {
+        state: u32,
+    }
+
+    impl XorShift32 {
+        fn next(&mut self) -> u32 {
+            let mut x = self.state;
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            self.state = x;
+            x
+        }
+    }
+
+    #[test]
+    fn pseudo_random_stack_invariants_hold() {
+        let mut rng = XorShift32 { state: 0x1234_5678 };
+        for case in 0..200u32 {
+            let n = (1 + rng.next() % 8) as usize;
+            let app_count = ((1 + rng.next() % 3) as usize).min(n);
+            let mut notices = Vec::new();
+            for j in 0..n {
+                let a = (rng.next() as usize) % app_count;
+                let app = ((b'A' + a as u8) as char).to_string();
+                notices.push(mk(case * 100 + j as u32, &app));
+            }
+            let mut distinct: Vec<String> = Vec::new();
+            for x in &notices {
+                if !distinct.contains(&x.app) {
+                    distinct.push(x.app.clone());
+                }
+            }
+            let choice = rng.next() % 4;
+            let expanded_owned: Option<String> = if choice == 0 {
+                None
+            } else {
+                Some(distinct[(choice as usize) % distinct.len()].clone())
+            };
+            let ds = decks(&notices, expanded_owned.as_deref());
+            let shown = shown_decks(&ds, 5);
+            let (y_map, visible, total_h) = deck_layout(&notices, &ds, &shown);
+            let mut idx_collapsed = vec![false; notices.len()];
+            for d in &ds {
+                for &idx in &d.indices {
+                    idx_collapsed[idx] = d.collapsed;
+                }
+            }
+            let mut vis: Vec<(f32, f32)> = Vec::new();
+            for (i, v) in visible.iter().enumerate() {
+                if *v {
+                    let h = if idx_collapsed[i] { CARD_H + STACK_PEEK } else { CARD_H };
+                    vis.push((y_map[i], h));
+                }
+            }
+            vis.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            for w in vis.windows(2) {
+                let bottom = w[0].0 + w[0].1;
+                assert!(bottom <= w[1].0 + 0.01, "case {case}: visible overlap {vis:?}");
+            }
+            let visible_count = visible.iter().filter(|v| **v).count();
+            if visible_count == 0 {
+                assert!(
+                    total_h == 0.,
+                    "case {case}: total must be 0 when nothing shown, got {total_h}"
+                );
+            } else {
+                let max_bottom = visible
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| **v)
+                    .map(|(i, _)| y_map[i] + CARD_H)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    total_h + 0.01 >= max_bottom,
+                    "case {case}: total {total_h} below max bottom {max_bottom}"
+                );
+            }
+            if shown.is_empty() {
+                assert!(
+                    total_h == 0.,
+                    "case {case}: total must be 0 when shown empty, got {total_h}"
+                );
+            }
+            let used: usize = shown.iter().map(|s| s.indices.len()).sum();
+            assert!(used <= 5, "case {case}: shown slots {used} exceed 5");
+            let hidden: usize = ds.iter().map(|d| d.hidden_count()).sum();
+            let invisible = notices.len() - visible_count;
+            let mut shown_ids = std::collections::HashSet::new();
+            for s in &shown {
+                for &idx in &s.indices {
+                    shown_ids.insert(idx);
+                }
+            }
+            let mut accounted = hidden;
+            for d in &ds {
+                for &idx in &d.indices {
+                    if !shown_ids.contains(&idx) && !(d.collapsed && idx != d.indices[0]) {
+                        accounted += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                accounted, invisible,
+                "case {case}: hidden+clipped {accounted} != invisible {invisible}"
+            );
+            for d in &ds {
+                if d.collapsed {
+                    let top_y = y_map[d.indices[0]];
+                    for &idx in d.indices.iter().skip(1) {
+                        assert!(
+                            (y_map[idx] - top_y).abs() < 0.01,
+                            "case {case}: collapsed hidden y {} != top y {top_y}",
+                            y_map[idx]
+                        );
+                    }
+                }
+            }
+        }
     }
 }

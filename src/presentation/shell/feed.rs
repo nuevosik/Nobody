@@ -100,4 +100,53 @@ mod tests {
         assert!(apply_snapshot(&mut stack, &mut exiting, vec![updated]));
         assert!(exiting.is_empty());
     }
+
+    #[test]
+    fn exiting_never_duplicates_across_repeated_snapshots() {
+        let mut stack = Stack { notices: vec![mk(1, "A"), mk(2, "B")] };
+        let mut exiting = Vec::new();
+        assert!(apply_snapshot(&mut stack, &mut exiting, vec![mk(2, "B")]));
+        assert_eq!(exiting.len(), 1);
+        for _ in 0..3 {
+            apply_snapshot(&mut stack, &mut exiting, vec![mk(2, "B")]);
+            assert_eq!(exiting.len(), 1);
+            let mut ids: Vec<u32> = exiting.iter().map(|e| e.notice.id).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            assert_eq!(ids.len(), exiting.len());
+        }
+        assert_eq!(exiting[0].notice.id, 1);
+    }
+
+    #[test]
+    fn same_id_body_update_keeps_single_entry_without_exiting() {
+        let mut stack = Stack { notices: vec![mk(1, "A")] };
+        let mut exiting = Vec::new();
+        let mut updated = mk(1, "A");
+        updated.body = "new".into();
+        assert!(apply_snapshot(&mut stack, &mut exiting, vec![updated.clone()]));
+        assert!(exiting.is_empty());
+        assert_eq!(stack.notices.len(), 1);
+        assert_eq!(stack.notices[0].id, 1);
+        assert_eq!(stack.notices[0].body, "new");
+        assert!(!apply_snapshot(&mut stack, &mut exiting, vec![updated]));
+        assert!(exiting.is_empty());
+        assert_eq!(stack.notices.len(), 1);
+    }
+
+    #[test]
+    fn full_turnover_moves_every_old_notice_to_exiting_once() {
+        let mut stack = Stack { notices: vec![mk(1, "A"), mk(2, "B"), mk(3, "C")] };
+        let mut exiting = Vec::new();
+        assert!(apply_snapshot(&mut stack, &mut exiting, vec![mk(4, "A"), mk(5, "B")]));
+        assert_eq!(exiting.len(), 3);
+        let mut ids: Vec<u32> = exiting.iter().map(|e| e.notice.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert!(apply_snapshot(&mut stack, &mut exiting, vec![mk(4, "A"), mk(5, "B")]));
+        assert_eq!(exiting.len(), 3);
+        let mut ids: Vec<u32> = exiting.iter().map(|e| e.notice.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
 }
