@@ -30,6 +30,10 @@ pub struct NotificationStack {
     quiet: bool,
     center_open: bool,
     center_query: String,
+    search_focus: gpui::FocusHandle,
+    center_focus_armed: bool,
+    dnd_manual: bool,
+    dnd_auto: bool,
     expanded: Option<String>,
     last_expanded: Option<String>,
     smooth_y: HashMap<u32, f32>,
@@ -66,6 +70,10 @@ impl NotificationStack {
             quiet: false,
             center_open: false,
             center_query: String::new(),
+            search_focus: cx.focus_handle().tab_stop(true).tab_index(3),
+            center_focus_armed: false,
+            dnd_manual: false,
+            dnd_auto: false,
             expanded: None,
             last_expanded: None,
             smooth_y: HashMap::new(),
@@ -90,6 +98,10 @@ impl NotificationStack {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let w = POPUP_W + MARGIN * 2.;
+        if !self.center_focus_armed {
+            self.center_focus_armed = true;
+            window.focus(&self.search_focus, cx);
+        }
         if self.last_window_h != Some(PANEL_H) {
             window.resize(Size::new(px(w), px(PANEL_H)));
             window.set_input_region(Some(&[Bounds {
@@ -110,6 +122,7 @@ impl NotificationStack {
 
         let root = div()
             .id("center")
+            .tab_group()
             .size_full()
             .font_family(FONT)
             .text_size(px(11.))
@@ -121,14 +134,25 @@ impl NotificationStack {
             .flex()
             .flex_col()
             .gap(px(8.))
-            .on_key_down(cx.listener(|stack, event: &gpui::KeyDownEvent, _, cx| {
-                if event.keystroke.modifiers.modified() {
-                    return;
-                }
-                if event.keystroke.key.as_str() == "escape" {
-                    stack.close_center();
-                    cx.stop_propagation();
-                    cx.notify();
+            .on_key_down(cx.listener(|stack, event: &gpui::KeyDownEvent, window, cx| {
+                let m = &event.keystroke.modifiers;
+                let clean = !m.control && !m.alt && !m.platform && !m.function;
+                match event.keystroke.key.as_str() {
+                    "tab" if clean => {
+                        if m.shift {
+                            window.focus_prev(cx);
+                        } else {
+                            window.focus_next(cx);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    "escape" if clean => {
+                        stack.close_center();
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    _ => {}
                 }
             }))
             .child(
@@ -145,7 +169,7 @@ impl NotificationStack {
                     .child(
                         div()
                             .id("center-close")
-                            .focusable()
+                            .tab_index(0)
                             .role(Role::Button)
                             .aria_label("Fechar central")
                             .aria_keyshortcuts("Escape")
@@ -183,7 +207,7 @@ impl NotificationStack {
                     .child(
                         div()
                             .id("center-dnd")
-                            .focusable()
+                            .tab_index(1)
                             .role(Role::Button)
                             .aria_label("Alternar Não Perturbe manual")
                             .cursor_pointer()
@@ -214,7 +238,7 @@ impl NotificationStack {
                     .child(
                         div()
                             .id("center-clear")
-                            .focusable()
+                            .tab_index(2)
                             .role(Role::Button)
                             .aria_label("Limpar histórico")
                             .cursor_pointer()
@@ -254,7 +278,7 @@ impl NotificationStack {
             .child(
                 div()
                     .id("center-search")
-                    .focusable()
+                    .track_focus(&self.search_focus)
                     .role(Role::SearchInput)
                     .aria_label("Buscar no histórico")
                     .px(px(8.))
@@ -268,20 +292,57 @@ impl NotificationStack {
                     } else {
                         query_text.clone()
                     })
-                    .on_key_down(cx.listener(move |stack, event: &gpui::KeyDownEvent, _, cx| {
-                        if event.keystroke.modifiers.modified() {
-                            return;
-                        }
-                        let key = event.keystroke.key.as_str();
-                        if key == "escape" {
-                            stack.close_center();
-                            cx.stop_propagation();
-                            cx.notify();
-                        } else if center::apply_search_key(&mut stack.center_query, key) {
-                            cx.stop_propagation();
-                            cx.notify();
-                        }
-                    })),
+                    .on_key_down(cx.listener(
+                        move |stack, event: &gpui::KeyDownEvent, window, cx| {
+                            let m = &event.keystroke.modifiers;
+                            let action = center::classify_search_key(
+                                event.keystroke.key.as_str(),
+                                event.keystroke.key_char.as_deref(),
+                                m.shift,
+                                m.control,
+                                m.alt,
+                                m.platform,
+                                m.function,
+                            );
+                            match action {
+                                center::SearchKeyAction::Close => {
+                                    stack.close_center();
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }
+                                center::SearchKeyAction::FocusNext => {
+                                    window.focus_next(cx);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }
+                                center::SearchKeyAction::FocusPrev => {
+                                    window.focus_prev(cx);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }
+                                center::SearchKeyAction::Paste => {
+                                    if let Some(text) =
+                                        cx.read_from_clipboard().and_then(|item| item.text())
+                                    {
+                                        let text = text.replace('\n', " ");
+                                        if !text.is_empty() {
+                                            stack.center_query.push_str(&text);
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        }
+                                    }
+                                }
+                                center::SearchKeyAction::InsertChar(_)
+                                | center::SearchKeyAction::Backspace => {
+                                    if center::apply_search_edit(&mut stack.center_query, &action) {
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }
+                                }
+                                center::SearchKeyAction::Ignore => {}
+                            }
+                        },
+                    )),
             );
 
         if entries.is_empty() {
@@ -403,10 +464,21 @@ fn spawn_feed_sync(queue: Queue, cx: &mut Context<NotificationStack>) {
                         feed::sync_snapshot(&mut stack.stack, &mut stack.exiting, snapshot, quiet);
                     let flipped = quiet != stack.quiet;
                     stack.quiet = quiet;
+                    let manual = commands::manual_quiet(&stack.queue);
+                    let auto = commands::quiet_mode(&stack.queue);
+                    let dnd_changed = center::dnd_state_changed(
+                        (stack.dnd_manual, stack.dnd_auto),
+                        (manual, auto),
+                    );
+                    stack.dnd_manual = manual;
+                    stack.dnd_auto = auto;
                     let center = commands::center_open(&stack.queue);
                     let center_flipped = center != stack.center_open;
                     stack.center_open = center;
-                    if changed || flipped || center_flipped {
+                    if center_flipped && !center {
+                        stack.center_focus_armed = false;
+                    }
+                    if changed || flipped || center_flipped || dnd_changed {
                         cx.notify();
                     }
                 })

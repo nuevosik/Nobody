@@ -132,7 +132,7 @@ impl Queue {
             }
         }
         drop(inner);
-        self.record_history(replaces, notice);
+        self.record_history(0, notice);
         PushOutcome { id, evicted }
     }
 
@@ -409,6 +409,26 @@ mod tests {
         assert_eq!(h[0].notice.body, "novo");
         let seqs: std::collections::HashSet<u64> = h.iter().map(|e| e.seq).collect();
         assert_eq!(seqs.len(), 2, "seq própria não pode duplicar");
+    }
+
+    #[test]
+    fn history_replace_after_close_creates_new_entry() {
+        let q = Queue::new();
+        let mut first = mk(0, "A");
+        first.summary = "primeira".into();
+        let id = push(&q, 0, first);
+        q.remove(id);
+
+        let mut ghost = mk(0, "Ghost");
+        ghost.summary = "fantasma".into();
+        let ghost_id = push(&q, id, ghost);
+        assert_ne!(ghost_id, id);
+
+        let h = q.history_snapshot();
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].notice.summary, "fantasma");
+        assert_eq!(h[1].notice.summary, "primeira");
+        assert_eq!(h[1].notice.id, id);
     }
 
     #[test]
