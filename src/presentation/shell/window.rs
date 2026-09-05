@@ -1,5 +1,3 @@
-//! Presentation — `NotificationStack` (LayerShell overlay).
-
 use std::time::Duration;
 
 use gpui::accesskit::Role;
@@ -11,7 +9,7 @@ use gpui::{
 use crate::application::{clock, commands};
 use crate::domain::queue::Queue;
 use crate::presentation::theme::{
-    ACCENT, CARD_GAP, CARD_H, CARD_R, FONT, INK, MARGIN, POPUP_W, fade,
+    ACCENT, CARD_GAP, CARD_H, CARD_R, FONT, INK, MARGIN, POPUP_W, QUIET_BADGE, fade,
 };
 
 use super::{anim, feed, geometry, popup};
@@ -20,6 +18,7 @@ pub struct NotificationStack {
     stack: feed::Stack,
     exiting: Vec<feed::Exiting>,
     queue: Queue,
+    quiet: bool,
     last_window_h: Option<f32>,
     last_input_len: usize,
 }
@@ -33,6 +32,7 @@ impl NotificationStack {
             stack: feed::Stack::default(),
             exiting: Vec::new(),
             queue,
+            quiet: false,
             last_window_h: None,
             last_input_len: usize::MAX,
         }
@@ -55,7 +55,6 @@ fn spawn_anim_ticker(cx: &mut Context<NotificationStack>) {
                 let exiting = !stack.exiting.is_empty();
                 entering || exiting
             }) else {
-                // entidade foi dropada (janela fechada) → encerra ticker
                 break;
             };
 
@@ -72,8 +71,6 @@ fn spawn_anim_ticker(cx: &mut Context<NotificationStack>) {
     .detach();
 }
 
-/// Espelha a fila no estado de tela a cada 100ms via `feed::apply_snapshot`.
-/// O dreno D-Bus (`host::flush_lifecycle_events`) roda no loop do `main`.
 fn spawn_feed_sync(queue: Queue, cx: &mut Context<NotificationStack>) {
     cx.spawn(async move |this, cx| {
         loop {
@@ -81,7 +78,12 @@ fn spawn_feed_sync(queue: Queue, cx: &mut Context<NotificationStack>) {
 
             if this
                 .update(cx, |stack, cx| {
-                    if feed::apply_snapshot(&mut stack.stack, &mut stack.exiting, snapshot) {
+                    let quiet = commands::quiet_mode(&stack.queue);
+                    let changed =
+                        feed::apply_snapshot(&mut stack.stack, &mut stack.exiting, snapshot);
+                    let flipped = quiet != stack.quiet;
+                    stack.quiet = quiet;
+                    if changed || flipped {
                         cx.notify();
                     }
                 })
@@ -98,10 +100,23 @@ fn spawn_feed_sync(queue: Queue, cx: &mut Context<NotificationStack>) {
 
 impl gpui::Render for NotificationStack {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        if self.quiet && !self.stack.notices.is_empty() {
+            geometry::sync_window_geometry(
+                window,
+                &mut self.last_window_h,
+                &mut self.last_input_len,
+                &[],
+                MARGIN + QUIET_BADGE + MARGIN,
+                0,
+            );
+            return div().size_full().relative().child(
+                div().absolute().top(px(MARGIN)).right(px(MARGIN)).child(popup::nobody_badge()),
+            );
+        }
+
         let n = self.stack.notices.len().min(5);
         let card_h = CARD_H;
 
-        // Filtra expirados já passados do EXIT_MS sem mutar durante render
         let exiting_alive: Vec<&feed::Exiting> =
             self.exiting.iter().filter(|e| clock::elapsed_ms(e.start_ms) < anim::EXIT_MS).collect();
         let exiting_max_y = exiting_alive.iter().map(|e| e.y + card_h).fold(0., f32::max);
@@ -157,7 +172,7 @@ impl gpui::Render for NotificationStack {
                     .map(move |(i, notice)| {
                         let y_target = y_map[i];
                         let t = anim::enter_progress(notice.arrived_at_ms);
-                        let slide = if reduced { 0. } else { (1. - t) * 28. };
+                        let slide = if reduced { 0. } else { (1. - t) * (POPUP_W + MARGIN) };
                         let base_opacity =
                             if i == 0 { 1. } else { (1. - i as f32 * 0.14).clamp(0.55, 1.) };
                         let opacity = t * base_opacity;
@@ -170,7 +185,9 @@ impl gpui::Render for NotificationStack {
                             .w(px(POPUP_W))
                             .min_h(px(card_h))
                             .rounded(px(CARD_R))
-                            .bg(fade(INK, 0.97))
+                            .border_1()
+                            .border_color(gpui::Rgba { r: 1., g: 1., b: 1., a: 0.1 })
+                            .bg(fade(INK, 0.78))
                             .shadow_lg()
                             .overflow_hidden()
                             .opacity(opacity)
@@ -202,8 +219,8 @@ impl gpui::Render for NotificationStack {
                             ))
                             .flex()
                             .items_center()
-                            .gap(px(12.))
-                            .px(px(16.))
+                            .gap(px(6.))
+                            .px(px(10.))
                             .child(popup::badge(notice.icon.as_ref(), &notice.app))
                             .child(popup::card_content(notice))
                     })
@@ -215,24 +232,27 @@ impl gpui::Render for NotificationStack {
                     .filter(|e| clock::elapsed_ms(e.start_ms) < anim::EXIT_MS)
                     .map(|ex| {
                         let t = anim::exit_progress(ex.start_ms);
-                        let y = if reduced { ex.y } else { ex.y - t * 12. };
+                        let y = ex.y;
+                        let slide_out = if reduced { 0. } else { t * (POPUP_W + MARGIN) };
                         let opacity = 1. - t;
                         div()
                             .id(("exiting", ex.notice.id))
                             .absolute()
                             .top(px(y))
-                            .right(px(MARGIN))
+                            .right(px(MARGIN - slide_out))
                             .w(px(POPUP_W))
                             .min_h(px(card_h))
                             .rounded(px(CARD_R))
-                            .bg(fade(INK, 0.97))
+                            .border_1()
+                            .border_color(gpui::Rgba { r: 1., g: 1., b: 1., a: 0.1 })
+                            .bg(fade(INK, 0.78))
                             .shadow_lg()
                             .overflow_hidden()
                             .opacity(opacity)
                             .flex()
                             .items_center()
-                            .gap(px(12.))
-                            .px(px(16.))
+                            .gap(px(6.))
+                            .px(px(10.))
                             .child(popup::badge(ex.notice.icon.as_ref(), &ex.notice.app))
                             .child(popup::card_content(&ex.notice))
                     })
@@ -241,7 +261,6 @@ impl gpui::Render for NotificationStack {
     }
 }
 
-/// Cria a janela LayerShell. Retorna erro em vez de panic.
 pub fn open_window(cx: &mut gpui::App, queue: Queue) -> anyhow::Result<()> {
     cx.open_window(
         WindowOptions {

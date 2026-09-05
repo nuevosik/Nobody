@@ -1,5 +1,3 @@
-//! Presentation/shell — layout do deck agrupado por app.
-
 use std::collections::HashMap;
 
 use gpui::{Bounds, Size, Window, point, px, size};
@@ -7,14 +5,12 @@ use gpui::{Bounds, Size, Window, point, px, size};
 use crate::domain::notice::Notice;
 use crate::presentation::theme::{CARD_GAP, CARD_H, MARGIN, POPUP_W, STACK_TOP};
 
-const DECK_GAP: f32 = 16.;
-const MIN_HIT: f32 = 24.;
+const STRIDE: f32 = CARD_H + CARD_GAP;
 
 pub(crate) fn grouped_y(notices: &[Notice], idx: usize) -> f32 {
     grouped_y_map(notices).get(idx).copied().unwrap_or(STACK_TOP)
 }
 
-/// Calcula Y agrupado por app em O(n).
 pub fn grouped_y_map(notices: &[Notice]) -> Vec<f32> {
     if notices.is_empty() {
         return Vec::new();
@@ -33,18 +29,15 @@ pub fn grouped_y_map(notices: &[Notice]) -> Vec<f32> {
     for app in app_order {
         if let Some(indices) = app_to_indices.get(&app) {
             for (k, &orig_idx) in indices.iter().enumerate() {
-                y_map[orig_idx] = y_cursor + k as f32 * DECK_GAP;
+                y_map[orig_idx] = y_cursor + k as f32 * STRIDE;
             }
-            let deck_h = CARD_H + (indices.len() as f32 - 1.) * DECK_GAP;
+            let deck_h = indices.len() as f32 * STRIDE - CARD_GAP;
             y_cursor += deck_h + CARD_GAP;
         }
     }
     y_map
 }
 
-/// Altura total ocupada pelos `n` primeiros cards visíveis.
-///
-/// Extraída de `render()` para permitir teste unitário puro.
 pub fn total_h_current_for(notices: &[Notice], n: usize) -> f32 {
     if n == 0 {
         return 0.;
@@ -53,7 +46,6 @@ pub fn total_h_current_for(notices: &[Notice], n: usize) -> f32 {
     y_map.iter().take(n).fold(STACK_TOP, |a, &y| a.max(y)) + CARD_H
 }
 
-/// Redimensiona a janela e recalcula a `input_region` só quando necessário.
 pub fn sync_window_geometry(
     window: &mut Window,
     last_h: &mut Option<f32>,
@@ -72,19 +64,12 @@ pub fn sync_window_geometry(
     let should_recalc_input = *last_n != n || should_resize;
     if should_recalc_input {
         let y_map = grouped_y_map(notices);
-        // Pré-computa último índice de cada app para hit-region correta
-        let mut last_idx_per_app: HashMap<String, usize> = HashMap::new();
-        for (k, n) in notices.iter().enumerate() {
-            last_idx_per_app.insert(n.app.clone(), k);
-        }
         let cards: Vec<Bounds<gpui::Pixels>> = (0..n)
             .map(|i| {
                 let y = y_map.get(i).copied().unwrap_or(STACK_TOP);
-                let is_last_in_group = last_idx_per_app.get(&notices[i].app).copied() == Some(i);
-                let h = if is_last_in_group { CARD_H } else { MIN_HIT };
                 Bounds {
                     origin: point(px(0.), px(y)),
-                    size: size(px(POPUP_W + MARGIN * 2.), px(h)),
+                    size: size(px(POPUP_W + MARGIN * 2.), px(CARD_H)),
                 }
             })
             .collect();
@@ -112,24 +97,22 @@ mod tests {
 
     #[test]
     fn interleaved_apps_total_h_uses_max_y_not_last_index() {
-        // A,B,A intercalados: y_map = [STACK_TOP, 154, STACK_TOP+DECK_GAP].
-        // total_h correto = max(y[0..3]) + CARD_H = 154 + 76 = 230,
-        // não y[2] + CARD_H = 62 + 76 = 138 (janela cliparia o card B).
         let notices = vec![mk(1, "A"), mk(2, "B"), mk(3, "A")];
         let n = notices.len();
         let y_map = grouped_y_map(&notices);
         assert_eq!(y_map.len(), 3);
-        let expected = y_map.iter().take(n).fold(STACK_TOP, |a, &y| a.max(y)) + CARD_H;
-        assert!((expected - 230.).abs() < 0.01, "expected 230, got {expected}");
-        let buggy = y_map[n - 1] + CARD_H;
-        assert!(
-            (buggy - 138.).abs() < 0.01,
-            "precondição do bug: y[n-1]+CARD_H deve ser 138, foi {buggy}"
-        );
+        assert!((y_map[0] - 46.).abs() < 0.01);
+        assert!((y_map[1] - 170.).abs() < 0.01);
+        assert!((y_map[2] - 108.).abs() < 0.01);
         let got = total_h_current_for(&notices, n);
-        assert!(
-            (got - expected).abs() < 0.01,
-            "total_h_current deve ser max(y)+CARD_H={expected}, foi {got}"
-        );
+        assert!((got - 224.).abs() < 0.01, "total_h deve ser 224, foi {got}");
+    }
+
+    #[test]
+    fn same_app_cards_do_not_overlap() {
+        let notices = vec![mk(1, "A"), mk(2, "A"), mk(3, "A")];
+        let y_map = grouped_y_map(&notices);
+        assert!((y_map[1] - y_map[0] - 62.).abs() < 0.01);
+        assert!((y_map[2] - y_map[1] - 62.).abs() < 0.01);
     }
 }

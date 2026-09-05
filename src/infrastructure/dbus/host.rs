@@ -1,5 +1,3 @@
-//! Infrastructure/dbus — hospeda o nome e drena lifecycle.
-
 use zbus::fdo::RequestNameReply;
 
 use crate::application::{clock, commands};
@@ -7,10 +5,6 @@ use crate::domain::close::CloseReason;
 use crate::domain::queue::Queue;
 use crate::infrastructure::dbus::daemon::{self, NOTIFICATION_PATH, NotificationDaemon};
 
-/// Conecta ao session bus, registra a interface e assume
-/// `org.freedesktop.Notifications`. Retorna `None` após `eprintln!` quando o
-/// barramento está inalcançável ou o nome já tem dono (mesmo comportamento do
-/// `spawn_dbus` original).
 pub async fn serve(queue: Queue) -> Option<zbus::Connection> {
     let conn = match zbus::Connection::session().await {
         Ok(c) => c,
@@ -46,8 +40,6 @@ pub async fn serve(queue: Queue) -> Option<zbus::Connection> {
     Some(conn)
 }
 
-/// Drena um tick de lifecycle: expira via `commands::expire` e atende
-/// `drain_close_requests`, emitindo `NotificationClosed` em ambos.
 pub async fn flush_lifecycle_events(connection: &zbus::Connection, queue: &Queue) {
     let interface = match connection
         .object_server()

@@ -1,4 +1,3 @@
-//! Application — comandos finos sobre o domain.
 use crate::domain::close::CloseReason;
 use crate::domain::notice::Notice;
 use crate::domain::queue::Queue;
@@ -13,4 +12,8 @@ pub fn expire(queue: &Queue, now_ms: u128) -> Vec<Notice> {
 
 pub fn request_dismissal(queue: &Queue, id: u32) {
     queue.request_close(id, CloseReason::DismissedByUser);
+}
+
+pub fn quiet_mode(queue: &Queue) -> bool {
+    queue.is_quiet()
 }

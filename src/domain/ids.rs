@@ -1,4 +1,3 @@
-//! Domain — alocação de IDs sem duplicata, com wrap-around seguro.
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -54,8 +53,6 @@ mod tests {
     #[test]
     fn reserve_id_never_rewinds_past_max() {
         use std::sync::atomic::Ordering;
-        // Root cause: `(current <= id).then_some(id+1 ou 1)` com id=u32::MAX
-        // e current pequeno rebobinava next_id para 1 (reuso não-monotônico).
         let next_id = AtomicU32::new(3);
         let before = next_id.load(Ordering::SeqCst);
         reserve_id(&next_id, u32::MAX);

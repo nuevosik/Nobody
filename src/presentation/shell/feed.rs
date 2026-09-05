@@ -1,14 +1,10 @@
-//! Presentation/shell — estado de tela.
-
 use crate::application::clock;
 use crate::domain::notice::Notice;
 
 use super::{anim, geometry};
 
-/// Estado de tela (não entidade): espelho local do `snapshot` da fila.
 #[derive(Clone, Default)]
 pub struct Stack {
-    /// Mais recente primeiro.
     pub notices: Vec<Notice>,
 }
 
@@ -18,9 +14,6 @@ pub struct Exiting {
     pub y: f32,
 }
 
-/// Difere `snapshot` contra o estado local: move removidos para `exiting` com
-/// o Y agrupado e retém por `< EXIT_MS`. Retorna `true` quando a UI precisa de
-/// `notify` (mesma condição do loop de sync original).
 pub fn apply_snapshot(
     stack: &mut Stack,
     exiting: &mut Vec<Exiting>,

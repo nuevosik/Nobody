@@ -1,4 +1,3 @@
-//! Infra/icons — desktop entries (.desktop).
 use std::path::{Path, PathBuf};
 
 use super::lookup::resolve_named_icon;
@@ -9,7 +8,6 @@ pub(crate) fn icon_from_desktop(id: &str) -> Option<PathBuf> {
         return None;
     }
     let mut files = Vec::new();
-    // XDG_DATA_DIRS + XDG_DATA_HOME
     if let Some(dirs) = std::env::var_os("XDG_DATA_DIRS") {
         for dir in std::env::split_paths(&dirs) {
             files.push(dir.join(format!("applications/{id}.desktop")));
@@ -36,7 +34,6 @@ pub(crate) fn icon_from_desktop(id: &str) -> Option<PathBuf> {
 
 pub(crate) fn desktop_icon_key(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
-    // limita a 16KB para não ler desktop malicioso gigante
     if text.len() > 16 * 1024 {
         return None;
     }
@@ -47,8 +44,6 @@ pub(crate) fn desktop_icon_key(path: &Path) -> Option<String> {
             if trimmed.starts_with('#') {
                 return None;
             }
-            // só a seção [Desktop Entry] vale; Icon sob [Desktop Action ...]
-            // ou outra seção não pode vazar como ícone principal.
             if trimmed.starts_with('[') && trimmed.ends_with(']') {
                 in_entry = trimmed == "[Desktop Entry]";
                 return None;
@@ -75,7 +70,6 @@ mod tests {
 
     #[test]
     fn desktop_icon_uses_entry_section_only() {
-        // Icon sob [Desktop Action ...] NÃO pode vazar como ícone principal.
         let dir = std::env::temp_dir().join(format!("nobody-sec-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("sec.desktop");
@@ -95,13 +89,11 @@ mod tests {
 
     #[test]
     fn desktop_huge_file_is_rejected() {
-        // >16KB deve retornar None (regressão; fix evita ler tudo antes do limite).
         let dir = std::env::temp_dir().join(format!("nobody-huge-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("huge.desktop");
         let mut f = std::fs::File::create(&file).unwrap();
         writeln!(f, "[Desktop Entry]").unwrap();
-        // ~32KB de preenchimento antes do Icon
         let pad = "A".repeat(32 * 1024);
         writeln!(f, "Comment={pad}").unwrap();
         writeln!(f, "Icon=late-icon").unwrap();

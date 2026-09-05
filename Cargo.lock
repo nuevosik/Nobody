@@ -3089,6 +3089,8 @@ dependencies = [
  "blocking",
  "gpui",
  "gpui_platform",
+ "image",
+ "smallvec",
  "zbus",
 ]
 

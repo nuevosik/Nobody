@@ -1,12 +1,8 @@
-//! UI — helpers de animação.
-
 use crate::application::clock;
 
-/// Duração da animação de entrada/saída em ms.
-pub const ENTER_MS: u128 = 220;
+pub const ENTER_MS: u128 = 380;
 pub const EXIT_MS: u128 = 260;
 
-/// Easing cúbico easeOut: 1 - (1-t)^3, t ∈ [0,1].
 pub fn ease_out_cubic(t: f32) -> f32 {
     1. - (1. - t).powi(3)
 }
@@ -35,7 +31,6 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
 
-    /// Env vars são globais do processo; serializa para não flakear em paralelo.
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -49,14 +44,12 @@ mod tests {
     impl EnvGuard {
         fn set(key: &'static str, val: &str) -> Self {
             let prev = std::env::var(key).ok();
-            // SAFETY: serializado via env_lock() neste módulo de teste.
             unsafe { std::env::set_var(key, val) };
             Self { key, prev }
         }
 
         fn remove(key: &'static str) -> Self {
             let prev = std::env::var(key).ok();
-            // SAFETY: serializado via env_lock() neste módulo de teste.
             unsafe { std::env::remove_var(key) };
             Self { key, prev }
         }
@@ -65,7 +58,6 @@ mod tests {
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             match &self.prev {
-                // SAFETY: serializado via env_lock() neste módulo de teste.
                 Some(v) => unsafe { std::env::set_var(self.key, v) },
                 None => unsafe { std::env::remove_var(self.key) },
             }

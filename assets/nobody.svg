@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="382 382 259 259">
+<defs><linearGradient id="silverGrad" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#d7d7db"/><stop offset="1" stop-color="#9c9ca2"/></linearGradient></defs>
+<path d="M392,392 L427,392 L631,596 L631,631 L596,631 L392,427 Z" fill="#f5f6fa"/>
+<path d="M446,392 L516,392 L568,444 L568,514 Z" fill="url(#silverGrad)"/>
+<path d="M581,392 L631,392 L631,577 L581,527 Z" fill="url(#silverGrad)"/>
+<path d="M392,446 L443,497 L443,631 L392,631 Z" fill="url(#silverGrad)"/>
+<path d="M455,509 L577,631 L508,631 L455,578 Z" fill="url(#silverGrad)"/>
+</svg>

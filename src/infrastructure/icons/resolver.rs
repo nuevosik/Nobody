@@ -1,4 +1,3 @@
-//! Infra/icons — resolução do ícone de uma notice.
 use std::collections::HashMap;
 use std::path::PathBuf;
 

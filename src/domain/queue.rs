@@ -1,15 +1,11 @@
-//! Domain — fila compartilhada entre D-Bus e UI.
-//! Thread-safe, poison-safe, com limite fixo.
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub use crate::domain::close::{CloseReason, CloseRequest, PushOutcome};
 use crate::domain::ids::{next_available_id, reserve_id};
 use crate::domain::notice::Notice;
 
-/// Mantém no máximo 12 notificações no queue (UI renderiza só 5).
-/// 12 = buffer para não perder burst enquanto animação de saída roda.
 pub const KEEP: usize = 12;
 
 #[derive(Clone)]
@@ -17,6 +13,7 @@ pub struct Queue {
     inner: Arc<Mutex<VecDeque<Notice>>>,
     close_requests: Arc<Mutex<VecDeque<CloseRequest>>>,
     next_id: Arc<AtomicU32>,
+    quiet: Arc<AtomicBool>,
 }
 
 impl Default for Queue {
@@ -31,7 +28,16 @@ impl Queue {
             inner: Arc::new(Mutex::new(VecDeque::new())),
             close_requests: Arc::new(Mutex::new(VecDeque::new())),
             next_id: Arc::new(AtomicU32::new(1)),
+            quiet: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn set_quiet(&self, quiet: bool) {
+        self.quiet.store(quiet, Ordering::Relaxed);
+    }
+
+    pub fn is_quiet(&self) -> bool {
+        self.quiet.load(Ordering::Relaxed)
     }
 
     pub fn push_with_outcome(&self, replaces: u32, mut notice: Notice) -> PushOutcome {
@@ -40,14 +46,11 @@ impl Queue {
         if replaces != 0 {
             if let Some(pos) = inner.iter().position(|n| n.id == replaces) {
                 reserve_id(&self.next_id, replaces);
-                // Substituição: remove antigo e reinsere no topo como nova chegada
                 inner.remove(pos);
                 notice.id = replaces;
                 inner.push_front(notice);
                 return PushOutcome { id: replaces, evicted: Vec::new() };
             }
-            // replaces solicitado mas não existe → aloca ID novo (não squatta ID arbitrário)
-            // ainda reserva para evitar reutilização imediata
             reserve_id(&self.next_id, replaces);
         }
 
@@ -63,7 +66,6 @@ impl Queue {
         PushOutcome { id, evicted }
     }
 
-    /// Remove por ID.
     pub fn remove(&self, id: u32) -> Option<Notice> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let idx = inner.iter().position(|n| n.id == id)?;
@@ -95,17 +97,11 @@ impl Queue {
 
         let mut requests = self.close_requests.lock().unwrap_or_else(|e| e.into_inner());
         if requests.len() >= KEEP * 2 {
-            // evita crescimento ilimitado se D-Bus cair
             requests.pop_front();
         }
         if let Some(existing) = requests.iter_mut().find(|r| r.id == id) {
-            // atualiza razão se nova for mais específica (DismissedByUser > Expired)
-            // prioriza interação do usuário sobre expiração
-            if existing.reason != reason {
-                // DismissedByUser e ClosedByCall têm precedência sobre Expired/Undefined
-                if reason.priority() > existing.reason.priority() {
-                    existing.reason = reason;
-                }
+            if existing.reason != reason && reason.priority() > existing.reason.priority() {
+                existing.reason = reason;
             }
             return;
         }
@@ -178,12 +174,10 @@ mod tests {
     #[test]
     fn replacement_keeps_the_requested_id_when_the_original_is_gone() {
         let q = Queue::new();
-        // replaces inexistente → não squatta ID arbitrário, aloca novo (spec: 0 ou inválido = novo)
         let id = push(&q, 42, mk(0, "A"));
 
         assert_ne!(id, 42);
         assert_eq!(q.len(), 1);
-        // segunda notificação deve ter ID sequencial diferente
         let id2 = push(&q, 0, mk(0, "B"));
         assert_ne!(id, id2);
     }
@@ -218,7 +212,6 @@ mod tests {
 
     #[test]
     fn close_request_upgrades_to_more_specific_reason() {
-        // Precedência: DismissedByUser/ClosedByCall(3) > Expired(2) > Undefined(1).
         let q = Queue::new();
         q.request_close(1, CloseReason::Expired);
         q.request_close(1, CloseReason::DismissedByUser);
@@ -238,7 +231,6 @@ mod tests {
 
     #[test]
     fn close_request_never_downgrades_reason() {
-        // Ordem inversa NÃO pode rebaixar: primeiro vence se já é mais específico.
         let q = Queue::new();
         q.request_close(1, CloseReason::DismissedByUser);
         q.request_close(1, CloseReason::Expired);
@@ -266,7 +258,6 @@ mod tests {
 
     #[test]
     fn ids_stay_unique_when_replaces_is_missing() {
-        // replaces inexistente não squatta: aloca novo e reserva sem reuso imediato.
         let q = Queue::new();
         let id1 = push(&q, 0, mk(0, "A"));
         let ghost = push(&q, 999_999, mk(0, "Ghost"));

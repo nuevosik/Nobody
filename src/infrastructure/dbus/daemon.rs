@@ -1,5 +1,3 @@
-//! Infrastructure — D-Bus `org.freedesktop.Notifications`.
-//! Toma posse do nome no session bus. Apps chamam `Notify` aqui.
 use std::collections::HashMap;
 use zbus::fdo;
 use zbus::interface;
@@ -50,15 +48,12 @@ impl NotificationDaemon {
             truncate(app_name.trim(), 64)
         };
 
-        // Limita actions e hints para evitar DoS por payload gigante.
         let mut actions = actions;
         if actions.len() > MAX_ACTIONS {
             actions.truncate(MAX_ACTIONS);
         }
-        // trunca cada action individualmente e garante UTF-8 seguro
         let actions: Vec<String> =
             actions.into_iter().map(|a| truncate(&a, MAX_ACTION_LEN)).collect();
-        // limita hints: pega só até MAX_HINTS e trunca icon string
         let hints_limited: HashMap<String, OwnedValue> = if hints.len() > MAX_HINTS {
             hints.into_iter().take(MAX_HINTS).collect()
         } else {
@@ -67,7 +62,6 @@ impl NotificationDaemon {
         let app_icon_trunc = truncate(app_icon, MAX_ICON_LEN);
         let is_crit = is_critical(&hints_limited);
 
-        // I/O de disco (lookup de ícone) offloaded para thread blocking.
         let icon_app = app.clone();
         let icon_str = app_icon_trunc.clone();
         let hints_clone = hints_limited.clone();
@@ -99,7 +93,6 @@ impl NotificationDaemon {
         id: u32,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> fdo::Result<()> {
-        // Spec: CloseNotification deve ser silencioso se id não existe
         if self.queue.remove(id).is_none() {
             return Ok(());
         }
@@ -108,11 +101,6 @@ impl NotificationDaemon {
     }
 
     pub fn get_capabilities(&self) -> Vec<String> {
-        // Suportado de verdade: "body" (texto puro, markup é removido via
-        // strip_markup) + "icon-static" (resolve_notice_icon). "actions" e
-        // "body-markup" NÃO são anunciados: actions são armazenadas/truncadas
-        // mas nunca renderizadas e ActionInvoked nunca é emitido (sem path de
-        // clique na UI); markup é sempre removido. Anunciar seria violar a spec.
         vec!["body".into(), "icon-static".into()]
     }
 
@@ -169,8 +157,6 @@ mod tests {
 
     #[test]
     fn does_not_advertise_unsupported_capabilities() {
-        // Contrato real: strip_markup() remove todo markup e ActionInvoked
-        // nunca é emitido — logo "body-markup"/"actions" não podem ser anunciados.
         let daemon = NotificationDaemon { queue: Queue::new() };
         let caps = daemon.get_capabilities();
         assert!(caps.contains(&"body".to_string()));

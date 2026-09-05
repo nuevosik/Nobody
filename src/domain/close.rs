@@ -1,4 +1,3 @@
-//! Domain — motivos de fechamento e resultado de push.
 use crate::domain::notice::Notice;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

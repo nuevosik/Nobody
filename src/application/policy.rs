@@ -1,4 +1,3 @@
-//! Application — política de expiração.
 pub const DEFAULT_EXPIRE_MS: i32 = 5_000;
 
 pub fn effective_expire_timeout(requested_timeout: i32, is_critical: bool) -> i32 {

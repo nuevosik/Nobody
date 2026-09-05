@@ -1,5 +1,3 @@
-//! Domain models — dados puros, sem dependência de UI ou D-Bus.
-
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
