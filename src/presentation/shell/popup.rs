@@ -125,7 +125,9 @@ pub fn card_content(notice: &Notice) -> gpui::Div {
                 div()
                     .text_size(px(TEXT_BODY))
                     .text_color(fade(MUTED, 1.))
+                    .whitespace_nowrap()
                     .overflow_hidden()
+                    .text_ellipsis()
                     .child(notice.body.clone()),
             )
         })
