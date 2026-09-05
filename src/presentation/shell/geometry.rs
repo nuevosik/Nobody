@@ -115,4 +115,30 @@ mod tests {
         assert!((y_map[1] - y_map[0] - 62.).abs() < 0.01);
         assert!((y_map[2] - y_map[1] - 62.).abs() < 0.01);
     }
+
+    #[test]
+    fn total_h_zero_visible_is_zero() {
+        let notices = vec![mk(1, "A")];
+        assert_eq!(total_h_current_for(&notices, 0), 0.);
+        assert_eq!(total_h_current_for(&[], 0), 0.);
+    }
+
+    #[test]
+    fn empty_map_and_out_of_range_fallback() {
+        let empty: Vec<Notice> = vec![];
+        assert!(grouped_y_map(&empty).is_empty());
+        assert!((grouped_y(&empty, 0) - STACK_TOP).abs() < 0.01);
+        let notices = vec![mk(1, "A")];
+        assert!((grouped_y(&notices, 99) - STACK_TOP).abs() < 0.01);
+    }
+
+    #[test]
+    fn decks_do_not_overlap_across_apps() {
+        let notices = vec![mk(1, "A"), mk(2, "B"), mk(3, "A"), mk(4, "B")];
+        let mut ys = grouped_y_map(&notices);
+        ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for w in ys.windows(2) {
+            assert!(w[1] - w[0] >= CARD_H - 0.01, "cards sobrepostos: {ys:?}");
+        }
+    }
 }

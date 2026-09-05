@@ -41,6 +41,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fade_decodes_channels_and_clamps_alpha() {
+        let c = fade(0x4da3ff, 1.);
+        assert!((c.r - 0x4d as f32 / 255.).abs() < 1e-6);
+        assert!((c.g - 0xa3 as f32 / 255.).abs() < 1e-6);
+        assert!((c.b - 0xff as f32 / 255.).abs() < 1e-6);
+        assert_eq!(fade(TEXT, 2.).a, 1.);
+        assert_eq!(fade(TEXT, -1.).a, 0.);
+    }
+
+    #[test]
     fn app_font_wires_inter_fallback() {
         let f = app_font();
         assert_eq!(f.family.as_ref(), FONT);

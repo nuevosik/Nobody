@@ -94,4 +94,26 @@ mod tests {
         let _r = EnvGuard::remove("REDUCED_MOTION");
         assert!(!prefers_reduced_motion());
     }
+
+    #[test]
+    fn prefers_primary_var_1_disables() {
+        let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _r = EnvGuard::remove("REDUCED_MOTION");
+        let _p = EnvGuard::set("PREFERS_REDUCED_MOTION", "1");
+        assert!(prefers_reduced_motion());
+    }
+
+    #[test]
+    fn ease_out_cubic_boundaries() {
+        assert!((ease_out_cubic(0.)).abs() < 1e-6);
+        assert!((ease_out_cubic(1.) - 1.).abs() < 1e-6);
+        let m = ease_out_cubic(0.5);
+        assert!(m > 0.5 && m < 1., "ease-out deve acelerar no início");
+    }
+
+    #[test]
+    fn future_arrival_has_zero_progress() {
+        assert_eq!(enter_progress(u128::MAX), 0.);
+        assert_eq!(exit_progress(u128::MAX), 0.);
+    }
 }

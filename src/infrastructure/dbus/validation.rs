@@ -43,6 +43,19 @@ mod tests {
     }
 
     #[test]
+    fn critical_threshold_covers_u8_i32_and_missing() {
+        for (v, expected) in [(0_u8, false), (1_u8, false), (2_u8, true), (3_u8, true)] {
+            let hints = HashMap::from([("urgency".into(), OwnedValue::from(v))]);
+            assert_eq!(is_critical(&hints), expected, "u8 {v}");
+        }
+        for (v, expected) in [(0_i32, false), (1_i32, false), (2_i32, true), (5_i32, true)] {
+            let hints = HashMap::from([("urgency".into(), OwnedValue::from(v))]);
+            assert_eq!(is_critical(&hints), expected, "i32 {v}");
+        }
+        assert!(!is_critical(&HashMap::new()));
+    }
+
+    #[test]
     fn truncate_limits() {
         assert_eq!(truncate("abcdef", 3), "abc");
     }

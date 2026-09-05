@@ -211,6 +211,13 @@ mod tests {
     }
 
     #[test]
+    fn close_request_ignores_id_zero() {
+        let q = Queue::new();
+        q.request_close(0, CloseReason::DismissedByUser);
+        assert!(q.drain_close_requests().is_empty());
+    }
+
+    #[test]
     fn close_request_upgrades_to_more_specific_reason() {
         let q = Queue::new();
         q.request_close(1, CloseReason::Expired);
