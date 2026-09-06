@@ -18,6 +18,20 @@ fn run_control(cli: Cli) -> i32 {
         Cli::CenterOpen => control::center_open(),
         Cli::CenterClose => control::center_close(),
         Cli::CenterToggle => control::center_toggle(),
+        Cli::ListJson => match control::list_json() {
+            Ok(json) => {
+                println!("{json}");
+                return 0;
+            }
+            Err(e) => Err(e),
+        },
+        Cli::HistoryJson => match control::history_json() {
+            Ok(json) => {
+                println!("{json}");
+                return 0;
+            }
+            Err(e) => Err(e),
+        },
         Cli::DismissAll => control::dismiss_all(),
         Cli::DndOn => control::dnd_on(),
         Cli::DndOff => control::dnd_off(),

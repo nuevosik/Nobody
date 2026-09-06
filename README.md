@@ -63,7 +63,12 @@ nobody center open | close | toggle
 nobody dismiss all
 nobody dnd on | off | toggle
 nobody dnd status   # mostra manual, tela cheia e efetivo
+nobody list --json
+nobody history --json
 ```
+
+- `nobody list --json` e `nobody history --json` exportam snapshots da fila ativa e do histórico
+  em JSON em linha única no formato `{"notifications":[...]}` (com `seq` no histórico).
 
 - Os comandos de central permitem abrir (`nobody center open`), fechar (`nobody center close`)
   ou alternar (`nobody center toggle`) a central de forma idempotente e previsível;

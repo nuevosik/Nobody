@@ -11,9 +11,13 @@ fn cli_parse_covers_all_commands() {
     assert!(matches!(cli::parse(&args(&["center", "open"])), cli::Cli::CenterOpen));
     assert!(matches!(cli::parse(&args(&["center", "close"])), cli::Cli::CenterClose));
     assert!(matches!(cli::parse(&args(&["center", "toggle"])), cli::Cli::CenterToggle));
+    assert!(matches!(cli::parse(&args(&["list", "--json"])), cli::Cli::ListJson));
+    assert!(matches!(cli::parse(&args(&["history", "--json"])), cli::Cli::HistoryJson));
     assert!(matches!(cli::parse(&args(&["dismiss", "all"])), cli::Cli::DismissAll));
     assert!(matches!(cli::parse(&args(&["dnd", "status"])), cli::Cli::DndStatus));
     assert!(matches!(cli::parse(&args(&["dnd", "nope"])), cli::Cli::Bad(_)));
+    assert!(matches!(cli::parse(&args(&["list"])), cli::Cli::Bad(_)));
+    assert!(matches!(cli::parse(&args(&["history"])), cli::Cli::Bad(_)));
 }
 
 #[test]
@@ -255,4 +259,67 @@ fn control_commands_reach_a_test_daemon() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert_eq!(requests, vec![CloseRequest { id, reason: CloseReason::DismissedByUser }]);
+
+    // Chama List via D-Bus
+    let list_res = session.call_method(
+        Some(name.clone()),
+        "/com/nobody/Control",
+        Some("com.nobody.Control"),
+        "List",
+        &(),
+    );
+    assert!(list_res.is_ok(), "List não foi entregue: {list_res:?}");
+    let list_json: String = list_res.unwrap().body().deserialize().expect("deserializes string");
+    let list_doc: serde_json::Value = serde_json::from_str(&list_json).expect("valid list json");
+    assert_eq!(list_doc["notifications"].as_array().unwrap().len(), 1);
+    assert_eq!(list_doc["notifications"][0]["app"], "Bus");
+
+    // Chama History via D-Bus
+    let hist_res = session.call_method(
+        Some(name.clone()),
+        "/com/nobody/Control",
+        Some("com.nobody.Control"),
+        "History",
+        &(),
+    );
+    assert!(hist_res.is_ok(), "History não foi entregue: {hist_res:?}");
+    let hist_json: String = hist_res.unwrap().body().deserialize().expect("deserializes string");
+    let hist_doc: serde_json::Value = serde_json::from_str(&hist_json).expect("valid history json");
+    assert_eq!(hist_doc["notifications"].as_array().unwrap().len(), 1);
+    assert_eq!(hist_doc["notifications"][0]["app"], "Bus");
+    assert_eq!(hist_doc["notifications"][0]["seq"], 1);
+}
+
+#[test]
+fn cli_binary_execution_contract() {
+    let bin = env!("CARGO_BIN_EXE_nobody");
+
+    // 1. Argumentos inválidos retornam código 2 e mensagem de uso em stderr
+    for bad_args in [
+        &["list"][..],
+        &["history"][..],
+        &["list", "extra"][..],
+        &["list", "--json", "extra"][..],
+        &["history", "extra"][..],
+        &["history", "--json", "extra"][..],
+    ] {
+        let output = std::process::Command::new(bin).args(bad_args).output().expect("runs binary");
+        assert_eq!(output.status.code(), Some(2), "args {bad_args:?} should exit with 2");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("uso: nobody"), "stderr should contain usage: {stderr}");
+        assert!(output.stdout.is_empty(), "stdout should be empty on bad args");
+    }
+
+    // 2. Sem daemon rodando (em barramento inválido / inexistente), retorna código 1, mensagem em stderr e stdout vazio
+    for cmd_args in [&["list", "--json"][..], &["history", "--json"][..]] {
+        let output = std::process::Command::new(bin)
+            .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/nobody-nonexistent-bus")
+            .args(cmd_args)
+            .output()
+            .expect("runs binary");
+        assert_eq!(output.status.code(), Some(1), "should exit with 1 when daemon is down");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.is_empty(), "stderr should contain error message");
+        assert!(output.stdout.is_empty(), "stdout must be empty without partial JSON on failure");
+    }
 }

@@ -1,5 +1,4 @@
-pub const USAGE: &str =
-    "uso: nobody [center open|close|toggle | dismiss all | dnd on|off|toggle|status]";
+pub const USAGE: &str = "uso: nobody [center open|close|toggle | dismiss all | dnd on|off|toggle|status | list --json | history --json]";
 
 pub enum Cli {
     Daemon,
@@ -11,6 +10,8 @@ pub enum Cli {
     DndOff,
     DndToggle,
     DndStatus,
+    ListJson,
+    HistoryJson,
     Bad(String),
 }
 
@@ -25,6 +26,8 @@ pub fn parse(args: &[String]) -> Cli {
         ["dnd", "off"] => Cli::DndOff,
         ["dnd", "toggle"] => Cli::DndToggle,
         ["dnd", "status"] => Cli::DndStatus,
+        ["list", "--json"] => Cli::ListJson,
+        ["history", "--json"] => Cli::HistoryJson,
         _ => Cli::Bad(USAGE.to_string()),
     }
 }
@@ -48,6 +51,8 @@ mod tests {
         assert!(matches!(parse(&args(&["dnd", "off"])), Cli::DndOff));
         assert!(matches!(parse(&args(&["dnd", "toggle"])), Cli::DndToggle));
         assert!(matches!(parse(&args(&["dnd", "status"])), Cli::DndStatus));
+        assert!(matches!(parse(&args(&["list", "--json"])), Cli::ListJson));
+        assert!(matches!(parse(&args(&["history", "--json"])), Cli::HistoryJson));
     }
 
     #[test]
@@ -61,6 +66,12 @@ mod tests {
             vec!["dnd", "oui"],
             vec!["foo"],
             vec!["center", "toggle", "extra"],
+            vec!["list"],
+            vec!["list", "extra"],
+            vec!["list", "--json", "extra"],
+            vec!["history"],
+            vec!["history", "extra"],
+            vec!["history", "--json", "extra"],
         ] {
             assert!(matches!(parse(&args(&words)), Cli::Bad(_)), "{words:?}");
         }

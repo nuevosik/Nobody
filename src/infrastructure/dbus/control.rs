@@ -1,7 +1,44 @@
 use crate::application::commands;
+use crate::domain::history::HistoryEntry;
+use crate::domain::notice::Notice;
 use crate::domain::queue::Queue;
 
 pub const CONTROL_PATH: &str = "/com/nobody/Control";
+
+fn serialize_list(notices: &[Notice]) -> String {
+    let items: Vec<serde_json::Value> = notices
+        .iter()
+        .map(|n| {
+            serde_json::json!({
+                "id": n.id,
+                "app": n.app,
+                "summary": n.summary,
+                "body": n.body,
+                "expire_ms": n.expire_ms,
+            })
+        })
+        .collect();
+    serde_json::to_string(&serde_json::json!({ "notifications": items }))
+        .unwrap_or_else(|_| r#"{"notifications":[]}"#.to_string())
+}
+
+fn serialize_history(entries: &[HistoryEntry]) -> String {
+    let items: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.notice.id,
+                "app": e.notice.app,
+                "summary": e.notice.summary,
+                "body": e.notice.body,
+                "expire_ms": e.notice.expire_ms,
+                "seq": e.seq,
+            })
+        })
+        .collect();
+    serde_json::to_string(&serde_json::json!({ "notifications": items }))
+        .unwrap_or_else(|_| r#"{"notifications":[]}"#.to_string())
+}
 
 pub struct ControlService {
     pub queue: Queue,
@@ -9,6 +46,14 @@ pub struct ControlService {
 
 #[zbus::interface(name = "com.nobody.Control")]
 impl ControlService {
+    pub fn list(&self) -> String {
+        serialize_list(&commands::snapshot(&self.queue))
+    }
+
+    pub fn history(&self) -> String {
+        serialize_history(&commands::history(&self.queue))
+    }
+
     pub fn center_open(&self) {
         commands::set_center_open(&self.queue, true);
     }
@@ -50,6 +95,8 @@ impl ControlService {
     default_path = "/com/nobody/Control"
 )]
 trait Control {
+    async fn list(&self) -> zbus::Result<String>;
+    async fn history(&self) -> zbus::Result<String>;
     async fn center_open(&self) -> zbus::Result<()>;
     async fn center_close(&self) -> zbus::Result<()>;
     async fn center_toggle(&self) -> zbus::Result<()>;
@@ -78,6 +125,16 @@ fn blocking_proxy() -> Result<ControlProxyBlocking<'static>, String> {
         .map_err(|e| format!("nobody: daemon não está rodando ({e})"))?;
     ControlProxyBlocking::new(&conn)
         .map_err(|e| format!("nobody: falha ao falar com o daemon ({e})"))
+}
+
+pub fn list_json() -> Result<String, String> {
+    let proxy = blocking_proxy()?;
+    proxy.list().map_err(|e| call_err("list", e))
+}
+
+pub fn history_json() -> Result<String, String> {
+    let proxy = blocking_proxy()?;
+    proxy.history().map_err(|e| call_err("history", e))
 }
 
 pub fn center_open() -> Result<(), String> {
@@ -210,5 +267,147 @@ mod tests {
         queue.set_quiet(true);
         svc.dnd_off();
         assert_eq!(svc.dnd_status(), (false, true, true));
+    }
+
+    #[test]
+    fn list_and_history_empty() {
+        let queue = Queue::new();
+        let svc = ControlService { queue };
+        assert_eq!(svc.list(), r#"{"notifications":[]}"#);
+        assert_eq!(svc.history(), r#"{"notifications":[]}"#);
+    }
+
+    #[test]
+    fn list_and_history_formatting_and_escaping() {
+        let queue = Queue::new();
+        queue.push_with_outcome(
+            0,
+            Notice {
+                id: 0,
+                app: "App \"Quoted\" & /slash/ \\backslash\\".into(),
+                summary: "Line 1\nLine 2".into(),
+                body: "Unicode café ☕ 🎉".into(),
+                icon: None,
+                actions: vec![],
+                expire_ms: 5000,
+                arrived_at_ms: 100,
+            },
+        );
+        let svc = ControlService { queue };
+        let list_json = svc.list();
+        let history_json = svc.history();
+
+        // Validar que ambos são documentos JSON válidos em uma única linha
+        assert!(!list_json.contains('\n'));
+        assert!(!history_json.contains('\n'));
+
+        let list_val: serde_json::Value = serde_json::from_str(&list_json).expect("valid json");
+        let item = &list_val["notifications"][0];
+        assert_eq!(item["app"], "App \"Quoted\" & /slash/ \\backslash\\");
+        assert_eq!(item["summary"], "Line 1\nLine 2");
+        assert_eq!(item["body"], "Unicode café ☕ 🎉");
+        assert_eq!(item["expire_ms"], 5000);
+        assert!(item.get("arrived_at_ms").is_none());
+
+        let hist_val: serde_json::Value = serde_json::from_str(&history_json).expect("valid json");
+        let hist_item = &hist_val["notifications"][0];
+        assert_eq!(hist_item["app"], "App \"Quoted\" & /slash/ \\backslash\\");
+        assert_eq!(hist_item["summary"], "Line 1\nLine 2");
+        assert_eq!(hist_item["body"], "Unicode café ☕ 🎉");
+        assert_eq!(hist_item["expire_ms"], 5000);
+        assert_eq!(hist_item["seq"], 1);
+        assert!(hist_item.get("arrived_at_ms").is_none());
+    }
+
+    #[test]
+    fn list_and_history_differences_and_ordering() {
+        let queue = Queue::new();
+        let o1 = queue.push_with_outcome(
+            0,
+            Notice {
+                id: 0,
+                app: "First".into(),
+                summary: "s1".into(),
+                body: "b1".into(),
+                icon: None,
+                actions: vec![],
+                expire_ms: 1000,
+                arrived_at_ms: 1,
+            },
+        );
+        let o2 = queue.push_with_outcome(
+            0,
+            Notice {
+                id: 0,
+                app: "Second".into(),
+                summary: "s2".into(),
+                body: "b2".into(),
+                icon: None,
+                actions: vec![],
+                expire_ms: 2000,
+                arrived_at_ms: 2,
+            },
+        );
+
+        // Remove o item 1 da fila ativa
+        queue.remove(o1.id);
+
+        let svc = ControlService { queue: queue.clone() };
+
+        let list_val: serde_json::Value = serde_json::from_str(&svc.list()).unwrap();
+        let hist_val: serde_json::Value = serde_json::from_str(&svc.history()).unwrap();
+
+        let list_arr = list_val["notifications"].as_array().unwrap();
+        let hist_arr = hist_val["notifications"].as_array().unwrap();
+
+        // Lista ativa deve conter apenas o item 2
+        assert_eq!(list_arr.len(), 1);
+        assert_eq!(list_arr[0]["id"], o2.id);
+        assert_eq!(list_arr[0]["app"], "Second");
+
+        // Histórico deve conter ambos os itens, mais recente primeiro (Second, depois First)
+        assert_eq!(hist_arr.len(), 2);
+        assert_eq!(hist_arr[0]["id"], o2.id);
+        assert_eq!(hist_arr[0]["app"], "Second");
+        assert_eq!(hist_arr[0]["seq"], 2);
+
+        assert_eq!(hist_arr[1]["id"], o1.id);
+        assert_eq!(hist_arr[1]["app"], "First");
+        assert_eq!(hist_arr[1]["seq"], 1);
+    }
+
+    #[test]
+    fn list_and_history_are_read_only_and_preserve_state() {
+        let queue = Queue::new();
+        queue.push_with_outcome(
+            0,
+            Notice {
+                id: 0,
+                app: "App".into(),
+                summary: "sum".into(),
+                body: "body".into(),
+                icon: None,
+                actions: vec![],
+                expire_ms: 0,
+                arrived_at_ms: 0,
+            },
+        );
+        let svc = ControlService { queue: queue.clone() };
+        svc.dnd_on();
+        svc.center_open();
+
+        let snapshot_before = queue.snapshot();
+        let history_before = queue.history_snapshot();
+        let dnd_before = svc.dnd_status();
+        let center_before = queue.is_center_open();
+
+        let _ = svc.list();
+        let _ = svc.history();
+
+        assert_eq!(queue.snapshot(), snapshot_before);
+        assert_eq!(queue.history_snapshot(), history_before);
+        assert_eq!(svc.dnd_status(), dnd_before);
+        assert_eq!(queue.is_center_open(), center_before);
+        assert!(queue.drain_close_requests().is_empty());
     }
 }
