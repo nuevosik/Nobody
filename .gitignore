@@ -15,5 +15,6 @@ sha256sums.txt
 .claude/
 .codex/
 .opencode/
+AGENTS.md
 skills-lock.json
 .DS_Store
