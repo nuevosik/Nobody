@@ -1,3 +1,4 @@
+use crate::application::commands;
 use crate::domain::queue::Queue;
 
 pub const CONTROL_PATH: &str = "/com/nobody/Control";
@@ -10,6 +11,10 @@ pub struct ControlService {
 impl ControlService {
     pub fn center_toggle(&self) {
         self.queue.toggle_center_open();
+    }
+
+    pub fn dismiss_all(&self) {
+        commands::dismiss_all(&self.queue);
     }
 
     pub fn dnd_on(&self) {
@@ -38,6 +43,7 @@ impl ControlService {
 )]
 trait Control {
     async fn center_toggle(&self) -> zbus::Result<()>;
+    async fn dismiss_all(&self) -> zbus::Result<()>;
     async fn dnd_on(&self) -> zbus::Result<()>;
     async fn dnd_off(&self) -> zbus::Result<()>;
     async fn dnd_toggle(&self) -> zbus::Result<()>;
@@ -67,6 +73,11 @@ fn blocking_proxy() -> Result<ControlProxyBlocking<'static>, String> {
 pub fn center_toggle() -> Result<(), String> {
     let proxy = blocking_proxy()?;
     proxy.center_toggle().map_err(|e| call_err("center toggle", e))
+}
+
+pub fn dismiss_all() -> Result<(), String> {
+    let proxy = blocking_proxy()?;
+    proxy.dismiss_all().map_err(|e| call_err("dismiss all", e))
 }
 
 pub fn dnd_on() -> Result<(), String> {

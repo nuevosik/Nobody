@@ -60,6 +60,7 @@ usual GPUI/Linux packages (`libwayland`, `libxkbcommon`, Vulkan).
 ```sh
 nobody              # inicia o daemon, como sempre
 nobody center toggle
+nobody dismiss all
 nobody dnd on | off | toggle
 nobody dnd status   # mostra manual, tela cheia e efetivo
 ```
@@ -71,6 +72,8 @@ nobody dnd status   # mostra manual, tela cheia e efetivo
 - Silêncio efetivo = manual OU tela cheia. O detector de tela cheia nunca
   sobrescreve a preferência manual; ao sair do silêncio, só aparecem
   notificações ainda ativas (o histórico não é reproduzido).
+- `nobody dismiss all` dispensa todas as notificações ativas de uma vez,
+  preservando o histórico. Pode ser associado a um atalho do desktop.
 - Limitação desta entrega: histórico apenas em memória — sem banco,
   persistência, exportação, ações de aplicativos ou novas bibliotecas.
   Reiniciar o daemon começa com histórico vazio.

@@ -8,12 +8,19 @@ const TTL: std::time::Duration = std::time::Duration::from_secs(1);
 static CACHE: OnceLock<Mutex<(Option<bool>, Instant)>> = OnceLock::new();
 
 pub fn parse_quiet(out: &str) -> bool {
-    out.lines().any(|line| {
-        let mut parts = line.splitn(2, ':');
-        parts.next().is_some_and(|k| k.trim() == "fullscreen")
-            && parts
-                .next()
-                .is_some_and(|v| v.split_whitespace().next().is_some_and(|n| n == "2" || n == "3"))
+    // hyprctl batch emits consecutive JSON documents, not a JSON array.
+    let mut documents = serde_json::Deserializer::from_str(out).into_iter::<serde_json::Value>();
+    let (Some(Ok(workspace)), Some(Ok(clients))) = (documents.next(), documents.next()) else {
+        return false;
+    };
+    let (Some(id), Some(clients)) = (workspace["id"].as_i64(), clients.as_array()) else {
+        return false;
+    };
+    clients.iter().any(|client| {
+        client["workspace"]["id"].as_i64() == Some(id)
+            && client["mapped"].as_bool() == Some(true)
+            && client["hidden"].as_bool() == Some(false)
+            && matches!(client["fullscreen"].as_u64(), Some(2 | 3))
     })
 }
 
@@ -53,7 +60,7 @@ fn query() -> bool {
         return false;
     }
     query_command(
-        Command::new("hyprctl").arg("activewindow"),
+        Command::new("hyprctl").args(["-j", "--batch", "activeworkspace; clients"]),
         std::time::Duration::from_millis(500),
     )
 }
@@ -84,30 +91,45 @@ mod tests {
 
     #[test]
     fn command_output_requires_successful_exit() {
+        let output = workspace_output(2, 5);
         assert!(query_command(
-            Command::new("sh").args(["-c", "printf 'fullscreen: 2\n'"]),
+            Command::new("sh").args(["-c", "printf '%s' \"$1\"", "sh", &output]),
             std::time::Duration::from_secs(1),
         ));
         assert!(!query_command(
-            Command::new("sh").args(["-c", "printf 'fullscreen: 2\n'; exit 1"]),
+            Command::new("sh").args(["-c", "printf '%s' \"$1\"; exit 1", "sh", &output]),
             std::time::Duration::from_secs(1),
         ));
     }
 
-    #[test]
-    fn fullscreen_values_trigger_quiet() {
-        assert!(parse_quiet("fullscreen: 2\n"));
-        assert!(parse_quiet("  fullscreen: 3  \n"));
-        assert!(!parse_quiet("fullscreen: 0\n"));
-        assert!(!parse_quiet("fullscreen: 1\n"));
+    fn workspace_output(fullscreen: u8, workspace: i64) -> String {
+        format!(
+            r#"{{"id":5,"hasfullscreen":true}}
+            [{{"workspace":{{"id":{workspace}}},"mapped":true,"hidden":false,
+               "fullscreen":{fullscreen},"fullscreenClient":2}},
+             {{"workspace":{{"id":5}},"mapped":true,"hidden":false,
+               "fullscreen":0,"focusHistoryID":0}}]"#
+        )
     }
 
     #[test]
-    fn ignores_fullscreen_client_and_garbage() {
-        let out = "fullscreenClient: 2\nfullscreen: 0\n";
-        assert!(!parse_quiet(out));
+    fn only_fullscreen_on_active_workspace_triggers_quiet_even_without_focus() {
+        for mode in [0, 1, 2, 3, 20] {
+            assert_eq!(parse_quiet(&workspace_output(mode, 5)), matches!(mode, 2 | 3));
+            assert!(!parse_quiet(&workspace_output(mode, 6)));
+        }
+        let output = workspace_output(2, 5);
+        assert!(!parse_quiet(&output.replace("\"mapped\":true", "\"mapped\":false")));
+        assert!(!parse_quiet(&output.replace("\"hidden\":false", "\"hidden\":true")));
+    }
+
+    #[test]
+    fn ignores_missing_or_malformed_workspace_and_clients() {
         assert!(!parse_quiet(""));
-        assert!(!parse_quiet("fullscreen:\n"));
-        assert!(!parse_quiet("fullscreen: 20\n"));
+        assert!(!parse_quiet(r#"{"id":5}"#));
+        assert!(!parse_quiet(r#"{"id":5} []"#));
+        assert!(!parse_quiet(r#"{"id":5} ["#));
+        assert!(!parse_quiet(r#"{} [{"fullscreen":2}]"#));
+        assert!(!parse_quiet(r#"{"id":5} {}"#));
     }
 }

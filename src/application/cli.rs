@@ -1,8 +1,9 @@
-pub const USAGE: &str = "uso: nobody [center toggle | dnd on|off|toggle|status]";
+pub const USAGE: &str = "uso: nobody [center toggle | dismiss all | dnd on|off|toggle|status]";
 
 pub enum Cli {
     Daemon,
     CenterToggle,
+    DismissAll,
     DndOn,
     DndOff,
     DndToggle,
@@ -14,6 +15,7 @@ pub fn parse(args: &[String]) -> Cli {
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         [] => Cli::Daemon,
         ["center", "toggle"] => Cli::CenterToggle,
+        ["dismiss", "all"] => Cli::DismissAll,
         ["dnd", "on"] => Cli::DndOn,
         ["dnd", "off"] => Cli::DndOff,
         ["dnd", "toggle"] => Cli::DndToggle,
@@ -34,6 +36,7 @@ mod tests {
     fn parses_every_supported_command() {
         assert!(matches!(parse(&args(&[])), Cli::Daemon));
         assert!(matches!(parse(&args(&["center", "toggle"])), Cli::CenterToggle));
+        assert!(matches!(parse(&args(&["dismiss", "all"])), Cli::DismissAll));
         assert!(matches!(parse(&args(&["dnd", "on"])), Cli::DndOn));
         assert!(matches!(parse(&args(&["dnd", "off"])), Cli::DndOff));
         assert!(matches!(parse(&args(&["dnd", "toggle"])), Cli::DndToggle));

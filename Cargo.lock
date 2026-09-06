@@ -3090,6 +3090,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "image",
+ "serde_json",
  "smallvec",
  "zbus",
 ]

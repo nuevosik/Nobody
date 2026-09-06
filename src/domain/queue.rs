@@ -44,6 +44,9 @@ impl Queue {
     /// Detector automático (tela cheia). Nunca toca a preferência manual.
     pub fn set_quiet(&self, quiet: bool) {
         self.quiet.store(quiet, Ordering::Relaxed);
+        if quiet {
+            self.set_center_open(false);
+        }
     }
 
     pub fn is_quiet(&self) -> bool {
@@ -69,10 +72,14 @@ impl Queue {
     }
 
     pub fn set_center_open(&self, open: bool) {
-        self.center_open.store(open, Ordering::Relaxed);
+        self.center_open.store(open && !self.is_quiet(), Ordering::Relaxed);
     }
 
     pub fn toggle_center_open(&self) -> bool {
+        if self.is_quiet() {
+            self.set_center_open(false);
+            return false;
+        }
         self.center_open.fetch_xor(true, Ordering::Relaxed) ^ true
     }
 
@@ -485,5 +492,24 @@ mod tests {
         assert!(!q.is_center_open());
         assert!(q.toggle_center_open());
         assert!(!q.toggle_center_open());
+    }
+
+    #[test]
+    fn fullscreen_closes_center_and_blocks_reopening() {
+        let q = Queue::new();
+        assert!(q.toggle_center_open());
+        q.set_quiet(true);
+        assert!(!q.is_center_open());
+        q.set_center_open(true);
+        assert!(!q.is_center_open());
+        assert!(!q.toggle_center_open());
+        assert!(!q.is_center_open());
+        q.set_quiet(false);
+        assert!(!q.is_center_open());
+        assert!(q.toggle_center_open());
+        q.set_manual_quiet(true);
+        assert!(q.is_center_open());
+        assert!(!q.toggle_center_open());
+        assert!(q.toggle_center_open());
     }
 }

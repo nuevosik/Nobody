@@ -15,6 +15,12 @@ pub fn request_dismissal(queue: &Queue, id: u32) {
     queue.request_close(id, CloseReason::DismissedByUser);
 }
 
+pub fn dismiss_all(queue: &Queue) {
+    for notice in snapshot(queue) {
+        request_dismissal(queue, notice.id);
+    }
+}
+
 pub fn quiet_mode(queue: &Queue) -> bool {
     queue.is_quiet()
 }
@@ -113,6 +119,31 @@ mod tests {
             queue.drain_close_requests(),
             vec![CloseRequest { id: 7, reason: CloseReason::DismissedByUser }]
         );
+    }
+
+    #[test]
+    fn dismiss_all_requests_active_notifications_and_preserves_history() {
+        let queue = Queue::new();
+        queue.push_with_outcome(0, mk("A", 0, 1));
+        queue.push_with_outcome(0, mk("B", 0, 2));
+        let active_ids = snapshot(&queue).into_iter().map(|n| n.id).collect::<Vec<_>>();
+        let history_before = history(&queue);
+
+        dismiss_all(&queue);
+
+        assert_eq!(
+            queue.drain_close_requests(),
+            active_ids
+                .into_iter()
+                .map(|id| CloseRequest { id, reason: CloseReason::DismissedByUser })
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(snapshot(&queue).len(), 2);
+        assert_eq!(history(&queue), history_before);
+
+        let empty = Queue::new();
+        dismiss_all(&empty);
+        assert!(empty.drain_close_requests().is_empty());
     }
 
     #[test]

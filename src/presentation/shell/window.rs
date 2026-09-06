@@ -43,6 +43,7 @@ pub struct NotificationStack {
     shown_at: HashMap<u32, u128>,
     last_window_h: Option<f32>,
     last_input_len: usize,
+    fullscreen_hidden: bool,
 }
 
 pub(crate) fn step_toward(current: f32, target: f32) -> (f32, bool) {
@@ -84,6 +85,7 @@ impl NotificationStack {
             shown_at: HashMap::new(),
             last_window_h: None,
             last_input_len: usize::MAX,
+            fullscreen_hidden: false,
         }
     }
 
@@ -708,6 +710,19 @@ fn spawn_feed_sync(queue: Queue, cx: &mut Context<NotificationStack>) {
 
 impl gpui::Render for NotificationStack {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        if self.queue.is_quiet() {
+            if !self.fullscreen_hidden {
+                window.resize(Size::new(px(1.), px(1.)));
+                window.set_input_region(Some(&[]));
+                self.fullscreen_hidden = true;
+            }
+            return div().size_full().into_any_element();
+        }
+        if self.fullscreen_hidden {
+            self.fullscreen_hidden = false;
+            self.last_window_h = None;
+            self.last_input_len = usize::MAX;
+        }
         if self.center_open {
             return self.render_center(window, cx).into_any_element();
         }
