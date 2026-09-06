@@ -1,7 +1,10 @@
-pub const USAGE: &str = "uso: nobody [center toggle | dismiss all | dnd on|off|toggle|status]";
+pub const USAGE: &str =
+    "uso: nobody [center open|close|toggle | dismiss all | dnd on|off|toggle|status]";
 
 pub enum Cli {
     Daemon,
+    CenterOpen,
+    CenterClose,
     CenterToggle,
     DismissAll,
     DndOn,
@@ -14,6 +17,8 @@ pub enum Cli {
 pub fn parse(args: &[String]) -> Cli {
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         [] => Cli::Daemon,
+        ["center", "open"] => Cli::CenterOpen,
+        ["center", "close"] => Cli::CenterClose,
         ["center", "toggle"] => Cli::CenterToggle,
         ["dismiss", "all"] => Cli::DismissAll,
         ["dnd", "on"] => Cli::DndOn,
@@ -35,6 +40,8 @@ mod tests {
     #[test]
     fn parses_every_supported_command() {
         assert!(matches!(parse(&args(&[])), Cli::Daemon));
+        assert!(matches!(parse(&args(&["center", "open"])), Cli::CenterOpen));
+        assert!(matches!(parse(&args(&["center", "close"])), Cli::CenterClose));
         assert!(matches!(parse(&args(&["center", "toggle"])), Cli::CenterToggle));
         assert!(matches!(parse(&args(&["dismiss", "all"])), Cli::DismissAll));
         assert!(matches!(parse(&args(&["dnd", "on"])), Cli::DndOn));
@@ -47,7 +54,9 @@ mod tests {
     fn rejects_unknown_or_partial_commands() {
         for words in [
             vec!["center"],
-            vec!["center", "open"],
+            vec!["center", "invalid"],
+            vec!["center", "open", "extra"],
+            vec!["center", "close", "extra"],
             vec!["dnd"],
             vec!["dnd", "oui"],
             vec!["foo"],

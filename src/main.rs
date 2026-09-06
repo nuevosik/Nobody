@@ -15,6 +15,8 @@ fn on_off(v: bool) -> &'static str {
 
 fn run_control(cli: Cli) -> i32 {
     let result = match cli {
+        Cli::CenterOpen => control::center_open(),
+        Cli::CenterClose => control::center_close(),
         Cli::CenterToggle => control::center_toggle(),
         Cli::DismissAll => control::dismiss_all(),
         Cli::DndOn => control::dnd_on(),

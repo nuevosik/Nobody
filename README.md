@@ -59,12 +59,15 @@ usual GPUI/Linux packages (`libwayland`, `libxkbcommon`, Vulkan).
 
 ```sh
 nobody              # inicia o daemon, como sempre
-nobody center toggle
+nobody center open | close | toggle
 nobody dismiss all
 nobody dnd on | off | toggle
 nobody dnd status   # mostra manual, tela cheia e efetivo
 ```
 
+- Os comandos de central permitem abrir (`nobody center open`), fechar (`nobody center close`)
+  ou alternar (`nobody center toggle`) a central de forma idempotente e previsível;
+  todos preservam notificações ativas, histórico e preferências de silêncio.
 - A central lista as últimas 100 notificações da sessão (mais recentes
   primeiro), com busca por aplicativo, título ou corpo, botão de limpar e
   controle de Não Perturbe. Escape fecha; expirar ou dispensar um popup

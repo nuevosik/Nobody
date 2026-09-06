@@ -8,6 +8,8 @@ use nobody::infrastructure::dbus::control::ControlService;
 fn cli_parse_covers_all_commands() {
     let args = |words: &[&str]| words.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     assert!(matches!(cli::parse(&args(&[])), cli::Cli::Daemon));
+    assert!(matches!(cli::parse(&args(&["center", "open"])), cli::Cli::CenterOpen));
+    assert!(matches!(cli::parse(&args(&["center", "close"])), cli::Cli::CenterClose));
     assert!(matches!(cli::parse(&args(&["center", "toggle"])), cli::Cli::CenterToggle));
     assert!(matches!(cli::parse(&args(&["dismiss", "all"])), cli::Cli::DismissAll));
     assert!(matches!(cli::parse(&args(&["dnd", "status"])), cli::Cli::DndStatus));
@@ -17,11 +19,59 @@ fn cli_parse_covers_all_commands() {
 #[test]
 fn control_service_drives_queue_without_bus() {
     let queue = Queue::new();
+    queue.push_with_outcome(
+        0,
+        Notice {
+            id: 0,
+            app: "TestApp".into(),
+            summary: "summary".into(),
+            body: "body".into(),
+            icon: None,
+            actions: vec![],
+            expire_ms: 0,
+            arrived_at_ms: 0,
+        },
+    );
+    let snapshot_before = queue.snapshot();
+    let history_before = queue.history_snapshot();
+
     let svc = ControlService { queue: queue.clone() };
-    svc.center_toggle();
+
+    assert!(!queue.is_center_open());
+    svc.center_open();
     assert!(queue.is_center_open());
+    svc.center_open();
+    assert!(queue.is_center_open());
+    svc.center_close();
+    assert!(!queue.is_center_open());
+    svc.center_close();
+    assert!(!queue.is_center_open());
+
+    assert_eq!(queue.snapshot(), snapshot_before);
+    assert_eq!(queue.history_snapshot(), history_before);
+    assert!(queue.drain_close_requests().is_empty());
+
+    // Silêncio automático por tela cheia ativo; executar open -> Continua fechada
+    queue.set_quiet(true);
+    svc.center_open();
+    assert!(!queue.is_center_open());
+
+    // Sair da tela cheia após esse open -> Continua fechada; não agendar abertura
+    queue.set_quiet(false);
+    assert!(!queue.is_center_open());
+
+    // Apenas Não Perturbe manual ativo; executar open -> Abre a central, preservando Não Perturbe
     svc.dnd_on();
     assert_eq!(svc.dnd_status(), (true, false, true));
+    svc.center_open();
+    assert!(queue.is_center_open());
+    assert_eq!(svc.dnd_status(), (true, false, true));
+    svc.center_close();
+    assert!(!queue.is_center_open());
+    assert_eq!(svc.dnd_status(), (true, false, true));
+
+    svc.center_toggle();
+    assert!(queue.is_center_open());
     svc.dnd_toggle();
     assert_eq!(svc.dnd_status(), (false, false, false));
 }
@@ -127,6 +177,51 @@ fn control_commands_reach_a_test_daemon() {
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    assert!(server_queue.is_center_open());
+
+    // Chama CenterClose via D-Bus
+    let result = session.call_method(
+        Some(name.clone()),
+        "/com/nobody/Control",
+        Some("com.nobody.Control"),
+        "CenterClose",
+        &(),
+    );
+    assert!(result.is_ok(), "CenterClose não foi entregue: {result:?}");
+    for _ in 0..50 {
+        if !server_queue.is_center_open() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(!server_queue.is_center_open());
+
+    // Chama CenterOpen via D-Bus
+    let result = session.call_method(
+        Some(name.clone()),
+        "/com/nobody/Control",
+        Some("com.nobody.Control"),
+        "CenterOpen",
+        &(),
+    );
+    assert!(result.is_ok(), "CenterOpen não foi entregue: {result:?}");
+    for _ in 0..50 {
+        if server_queue.is_center_open() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(server_queue.is_center_open());
+
+    // Chama CenterOpen novamente (idempotente)
+    let result = session.call_method(
+        Some(name.clone()),
+        "/com/nobody/Control",
+        Some("com.nobody.Control"),
+        "CenterOpen",
+        &(),
+    );
+    assert!(result.is_ok(), "CenterOpen repetido não foi entregue: {result:?}");
     assert!(server_queue.is_center_open());
 
     server_queue.push_with_outcome(

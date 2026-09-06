@@ -9,6 +9,14 @@ pub struct ControlService {
 
 #[zbus::interface(name = "com.nobody.Control")]
 impl ControlService {
+    pub fn center_open(&self) {
+        commands::set_center_open(&self.queue, true);
+    }
+
+    pub fn center_close(&self) {
+        commands::set_center_open(&self.queue, false);
+    }
+
     pub fn center_toggle(&self) {
         self.queue.toggle_center_open();
     }
@@ -42,6 +50,8 @@ impl ControlService {
     default_path = "/com/nobody/Control"
 )]
 trait Control {
+    async fn center_open(&self) -> zbus::Result<()>;
+    async fn center_close(&self) -> zbus::Result<()>;
     async fn center_toggle(&self) -> zbus::Result<()>;
     async fn dismiss_all(&self) -> zbus::Result<()>;
     async fn dnd_on(&self) -> zbus::Result<()>;
@@ -68,6 +78,16 @@ fn blocking_proxy() -> Result<ControlProxyBlocking<'static>, String> {
         .map_err(|e| format!("nobody: daemon não está rodando ({e})"))?;
     ControlProxyBlocking::new(&conn)
         .map_err(|e| format!("nobody: falha ao falar com o daemon ({e})"))
+}
+
+pub fn center_open() -> Result<(), String> {
+    let proxy = blocking_proxy()?;
+    proxy.center_open().map_err(|e| call_err("center open", e))
+}
+
+pub fn center_close() -> Result<(), String> {
+    let proxy = blocking_proxy()?;
+    proxy.center_close().map_err(|e| call_err("center close", e))
 }
 
 pub fn center_toggle() -> Result<(), String> {
@@ -113,6 +133,67 @@ mod tests {
         assert!(queue.snapshot().is_empty());
         svc.center_toggle();
         assert!(!queue.is_center_open());
+    }
+
+    #[test]
+    fn open_and_close_idempotent_and_preserve_state() {
+        let queue = Queue::new();
+        queue.push_with_outcome(
+            0,
+            crate::domain::notice::Notice {
+                id: 0,
+                app: "App".into(),
+                summary: "sum".into(),
+                body: "body".into(),
+                icon: None,
+                actions: vec![],
+                expire_ms: 0,
+                arrived_at_ms: 0,
+            },
+        );
+        let notices_before = queue.snapshot();
+        let history_before = queue.history_snapshot();
+        let svc = ControlService { queue: queue.clone() };
+
+        assert!(!queue.is_center_open());
+
+        svc.center_open();
+        assert!(queue.is_center_open());
+
+        svc.center_open();
+        assert!(queue.is_center_open());
+
+        svc.center_close();
+        assert!(!queue.is_center_open());
+
+        svc.center_close();
+        assert!(!queue.is_center_open());
+
+        assert_eq!(queue.snapshot(), notices_before);
+        assert_eq!(queue.history_snapshot(), history_before);
+        assert!(queue.drain_close_requests().is_empty());
+    }
+
+    #[test]
+    fn open_respects_fullscreen_and_manual_dnd() {
+        let queue = Queue::new();
+        let svc = ControlService { queue: queue.clone() };
+
+        // Silêncio automático por tela cheia ativo; executar open -> Continua fechada
+        queue.set_quiet(true);
+        svc.center_open();
+        assert!(!queue.is_center_open());
+
+        // Sair da tela cheia após esse open -> Continua fechada; não agendar abertura
+        queue.set_quiet(false);
+        assert!(!queue.is_center_open());
+
+        // Apenas Não Perturbe manual ativo; executar open -> Abre a central, preservando Não Perturbe
+        svc.dnd_on();
+        assert_eq!(svc.dnd_status(), (true, false, true));
+        svc.center_open();
+        assert!(queue.is_center_open());
+        assert_eq!(svc.dnd_status(), (true, false, true));
     }
 
     #[test]
