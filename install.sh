@@ -1,6 +1,4 @@
 #!/bin/sh
-# Install nobody from the latest GitHub Release.
-#   curl -fsSL https://github.com/nuevosik/Nobody/releases/latest/download/install.sh | sh
 set -eu
 
 REPO="nuevosik/Nobody"

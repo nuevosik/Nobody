@@ -68,6 +68,8 @@ mod tests {
             actions: vec![],
             expire_ms: 0,
             arrived_at_ms: 0,
+            stack_tag: None,
+            progress: None,
         };
         let outcome = PushOutcome { id: 1, evicted: vec![notice.clone()] };
         assert_eq!(outcome.id, 1);

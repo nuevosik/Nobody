@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use gpui::{FontWeight, ParentElement, Styled, StyledImage, div, img, prelude::*, px};
+use gpui::{FontWeight, ParentElement, Styled, StyledImage, div, img, prelude::*, px, relative};
 
 use crate::domain::notice::Notice;
-use crate::presentation::theme::{MUTED, TEXT, TEXT_BADGE, TEXT_BODY, TEXT_TITLE, app_font, fade};
+use crate::presentation::theme::{
+    ACCENT, MUTED, TEXT, TEXT_BADGE, TEXT_BODY, TEXT_TITLE, app_font, fade,
+};
 
 pub fn badge_initial(app: &str) -> String {
     app.chars()
@@ -156,18 +158,31 @@ pub fn card_content(notice: &Notice) -> gpui::Div {
                     .child(notice.body.clone()),
             )
         })
+        .when_some(notice.progress, |el, progress| el.child(progress_bar(progress)))
+}
+
+fn progress_bar(progress: u8) -> gpui::Div {
+    div()
+        .h(px(3.))
+        .w_full()
+        .rounded(px(2.))
+        .overflow_hidden()
+        .bg(fade(MUTED, 0.28))
+        .child(div().h_full().w(relative(progress as f32 / 100.)).bg(fade(ACCENT, 1.)))
 }
 
 pub fn a11y_label(notice: &Notice) -> String {
+    let progress =
+        notice.progress.map(|value| format!(". Progresso: {value}%")).unwrap_or_default();
     if notice.body.is_empty() {
         format!(
-            "{} de {}. Pressione Enter, Espaço ou Escape para dispensar",
-            notice.summary, notice.app
+            "{} de {}{}. Pressione Enter, Espaço ou Escape para dispensar",
+            notice.summary, notice.app, progress
         )
     } else {
         format!(
-            "{} — {} de {}. Pressione Enter, Espaço ou Escape para dispensar",
-            notice.summary, notice.body, notice.app
+            "{} — {} de {}{}. Pressione Enter, Espaço ou Escape para dispensar",
+            notice.summary, notice.body, notice.app, progress
         )
     }
 }
@@ -236,6 +251,8 @@ mod tests {
             actions: vec![],
             expire_ms: 0,
             arrived_at_ms: 0,
+            stack_tag: None,
+            progress: None,
         }
     }
 
@@ -255,5 +272,12 @@ mod tests {
             a11y_label(&n),
             "Title — Hello de Firefox. Pressione Enter, Espaço ou Escape para dispensar"
         );
+    }
+
+    #[test]
+    fn a11y_label_includes_progress_when_present() {
+        let mut n = mk_notice("Title", "Hello", "Firefox");
+        n.progress = Some(50);
+        assert!(a11y_label(&n).contains("Progresso: 50%"));
     }
 }

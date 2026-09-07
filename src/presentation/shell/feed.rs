@@ -72,6 +72,8 @@ mod tests {
             actions: vec![],
             expire_ms: 0,
             arrived_at_ms: 0,
+            stack_tag: None,
+            progress: None,
         }
     }
 
@@ -166,6 +168,22 @@ mod tests {
         assert!(!apply_snapshot(&mut stack, &mut exiting, vec![updated]));
         assert!(exiting.is_empty());
         assert_eq!(stack.notices.len(), 1);
+    }
+
+    #[test]
+    fn progress_only_update_invalidates_snapshot_and_can_be_removed() {
+        let mut stack = Stack { notices: vec![mk(1, "A")] };
+        let mut exiting = Vec::new();
+        let mut updated = mk(1, "A");
+        updated.progress = Some(10);
+        assert!(apply_snapshot(&mut stack, &mut exiting, vec![updated.clone()]));
+        updated.progress = Some(90);
+        assert!(apply_snapshot(&mut stack, &mut exiting, vec![updated.clone()]));
+        assert_eq!(stack.notices[0].progress, Some(90));
+        updated.progress = None;
+        assert!(apply_snapshot(&mut stack, &mut exiting, vec![updated]));
+        assert_eq!(stack.notices[0].progress, None);
+        assert!(exiting.is_empty());
     }
 
     #[test]

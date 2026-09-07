@@ -8,7 +8,6 @@ const TTL: std::time::Duration = std::time::Duration::from_secs(1);
 static CACHE: OnceLock<Mutex<(Option<bool>, Instant)>> = OnceLock::new();
 
 pub fn parse_quiet(out: &str) -> bool {
-    // hyprctl batch emits consecutive JSON documents, not a JSON array.
     let mut documents = serde_json::Deserializer::from_str(out).into_iter::<serde_json::Value>();
     let (Some(Ok(workspace)), Some(Ok(clients))) = (documents.next(), documents.next()) else {
         return false;
@@ -29,7 +28,6 @@ fn query_command(command: &mut Command, timeout: std::time::Duration) -> bool {
         return false;
     };
     let stdout = child.stdout.take().expect("stdout is piped");
-    // Drain concurrently so a full pipe cannot prevent the child from exiting.
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         stdout.take(64 * 1024).read_to_end(&mut bytes).map(|_| bytes)

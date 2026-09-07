@@ -52,23 +52,45 @@ usual GPUI/Linux packages (`libwayland`, `libxkbcommon`, Vulkan).
 - Keeps 12 notifications, renders the 5 most recent.
 - Timeout: `-1` means server default (5s), `0` never expires; critical
   notifications never auto-expire.
+- Notificações ativas que anunciam a chave `default` exibem o botão `Abrir`;
+  Enter e Space também o ativam. A ação emite `ActionInvoked` e fecha com
+  razão 2, preservando o histórico. O daemon não anuncia a capability
+  `actions`, então alguns clientes podem não enviar ações. O daemon não abre
+  URLs ou aplicativos: o cliente decide o que fazer com o sinal, e o foco
+  depende do token de ativação e do compositor Wayland.
+- Notify aceita `x-dunst-stack-tag` e `x-canonical-private-synchronous` como
+  tags string de 1 a 128 caracteres; a primeira tem precedência quando ambas
+  são válidas. Na mesma aplicação, uma tag ativa substitui a notificação
+  anterior, preservando seu ID e atualizando conteúdo, timeout e chegada.
+- Notify aceita o hint `value` somente como inteiro D-Bus `int32` entre 0 e 100;
+  quando válido, exibe uma barra discreta no popup e inclui o percentual na
+  descrição acessível. `list --json` e `history --json` exportam `progress` como
+  inteiro ou `null`.
 - Spotify notifications show the current album cover (via MPRIS + `curl`),
   cached under `~/.cache/nobody/covers/`.
 
 ### Central e Não Perturbe
 
 ```sh
-nobody              # inicia o daemon, como sempre
+nobody
 nobody center open | close | toggle
 nobody dismiss all
+nobody dismiss 42
+nobody dismiss app "Spotify"
 nobody dnd on | off | toggle
-nobody dnd status   # mostra manual, tela cheia e efetivo
+nobody dnd status
 nobody list --json
 nobody history --json
 ```
 
 - `nobody list --json` e `nobody history --json` exportam snapshots da fila ativa e do histórico
   em JSON em linha única no formato `{"notifications":[...]}` (com `seq` no histórico).
+
+- A configuração opcional fica em `$XDG_CONFIG_HOME/nobody/config` quando
+  `XDG_CONFIG_HOME` é absoluto; caso contrário, em `$HOME/.config/nobody/config`.
+  Os defaults são `default-timeout=5000`, `max-visible=5` e `anchor=top-right`.
+  O arquivo aceita essas três chaves, comentários em linhas próprias e valores
+  repetidos com o último valor válido; alterações exigem reiniciar o daemon.
 
 - Os comandos de central permitem abrir (`nobody center open`), fechar (`nobody center close`)
   ou alternar (`nobody center toggle`) a central de forma idempotente e previsível;
@@ -82,9 +104,20 @@ nobody history --json
   notificações ainda ativas (o histórico não é reproduzido).
 - `nobody dismiss all` dispensa todas as notificações ativas de uma vez,
   preservando o histórico. Pode ser associado a um atalho do desktop.
-- Limitação desta entrega: histórico apenas em memória — sem banco,
-  persistência, exportação, ações de aplicativos ou novas bibliotecas.
-  Reiniciar o daemon começa com histórico vazio.
+- `nobody dismiss 42` dispensa uma notificação pelo ID decimal mostrado na
+  listagem; `nobody dismiss app "Spotify"` dispensa todas as notificações cujo
+  aplicativo seja exatamente o nome mostrado na listagem (maiúsculas e espaços
+  fazem parte da comparação). IDs inexistentes e aplicativos sem correspondência
+  terminam com sucesso sem efeito. A seleção por aplicativo usa o snapshot do
+  momento da chamada; notificações posteriores ficam para uma próxima operação.
+- Os comandos de controle retornam 0 quando concluídos, 1 quando o daemon/D-Bus
+  falha e 2 para sintaxe inválida; esses comandos não iniciam a GUI. Dispensar
+  preserva o histórico, o estado da central e Não Perturbe.
+- Limitação desta entrega: histórico apenas em memória — sem banco ou
+  persistência. A exportação JSON mostra somente os snapshots atuais e do
+  histórico mantido durante a sessão; não há menu de ações nomeadas nem
+  abertura automática de aplicativos. Reiniciar o daemon começa com histórico
+  vazio.
 
 ### Waybar
 
@@ -129,8 +162,11 @@ Debug:
 - `Notify`, `CloseNotification`, `GetCapabilities`, `GetServerInformation`;
   emits `NotificationClosed`.
 - `replaces_id` replaces atomically.
+- `x-dunst-stack-tag` e `x-canonical-private-synchronous` substituem uma
+  notificação ativa da mesma aplicação quando `replaces_id` é zero; tags
+  inválidas são ignoradas e substituições explícitas por ID têm precedência.
 - Icon path/name plus `desktop-entry` lookup scoped to known locations;
-  markup is stripped. No actions, `image-data` or persistence.
+  markup is stripped. No named action menu, `image-data` or persistence.
 
 ## Architecture
 

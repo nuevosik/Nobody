@@ -1,3 +1,5 @@
+use zbus::fdo;
+
 use crate::application::commands;
 use crate::domain::history::HistoryEntry;
 use crate::domain::notice::Notice;
@@ -15,6 +17,7 @@ fn serialize_list(notices: &[Notice]) -> String {
                 "summary": n.summary,
                 "body": n.body,
                 "expire_ms": n.expire_ms,
+                "progress": n.progress,
             })
         })
         .collect();
@@ -32,6 +35,7 @@ fn serialize_history(entries: &[HistoryEntry]) -> String {
                 "summary": e.notice.summary,
                 "body": e.notice.body,
                 "expire_ms": e.notice.expire_ms,
+                "progress": e.notice.progress,
                 "seq": e.seq,
             })
         })
@@ -70,6 +74,22 @@ impl ControlService {
         commands::dismiss_all(&self.queue);
     }
 
+    pub fn dismiss(&self, id: u32) -> fdo::Result<()> {
+        if id == 0 {
+            return Err(fdo::Error::InvalidArgs("id must be positive".into()));
+        }
+        commands::request_dismissal(&self.queue, id);
+        Ok(())
+    }
+
+    pub fn dismiss_app(&self, app: &str) -> fdo::Result<()> {
+        if app.trim().is_empty() {
+            return Err(fdo::Error::InvalidArgs("app name must not be empty".into()));
+        }
+        commands::dismiss_app(&self.queue, app);
+        Ok(())
+    }
+
     pub fn dnd_on(&self) {
         self.queue.set_manual_quiet(true);
     }
@@ -101,6 +121,8 @@ trait Control {
     async fn center_close(&self) -> zbus::Result<()>;
     async fn center_toggle(&self) -> zbus::Result<()>;
     async fn dismiss_all(&self) -> zbus::Result<()>;
+    async fn dismiss(&self, id: u32) -> zbus::Result<()>;
+    async fn dismiss_app(&self, app: &str) -> zbus::Result<()>;
     async fn dnd_on(&self) -> zbus::Result<()>;
     async fn dnd_off(&self) -> zbus::Result<()>;
     async fn dnd_toggle(&self) -> zbus::Result<()>;
@@ -157,6 +179,16 @@ pub fn dismiss_all() -> Result<(), String> {
     proxy.dismiss_all().map_err(|e| call_err("dismiss all", e))
 }
 
+pub fn dismiss(id: u32) -> Result<(), String> {
+    let proxy = blocking_proxy()?;
+    proxy.dismiss(id).map_err(|e| call_err("dismiss", e))
+}
+
+pub fn dismiss_app(app: &str) -> Result<(), String> {
+    let proxy = blocking_proxy()?;
+    proxy.dismiss_app(app).map_err(|e| call_err("dismiss app", e))
+}
+
 pub fn dnd_on() -> Result<(), String> {
     let proxy = blocking_proxy()?;
     proxy.dnd_on().map_err(|e| call_err("dnd on", e))
@@ -193,6 +225,41 @@ mod tests {
     }
 
     #[test]
+    fn dismiss_validates_boundary_and_selects_exact_app() {
+        let queue = Queue::new();
+        let id = queue
+            .push_with_outcome(
+                0,
+                Notice {
+                    id: 0,
+                    app: "Spotify".into(),
+                    summary: "sum".into(),
+                    body: String::new(),
+                    icon: None,
+                    actions: vec![],
+                    expire_ms: 0,
+                    arrived_at_ms: 0,
+                    stack_tag: None,
+                    progress: None,
+                },
+            )
+            .id;
+        let svc = ControlService { queue: queue.clone() };
+
+        assert!(matches!(svc.dismiss(0), Err(fdo::Error::InvalidArgs(_))));
+        assert!(matches!(svc.dismiss_app("   "), Err(fdo::Error::InvalidArgs(_))));
+        svc.dismiss(id).unwrap();
+        svc.dismiss_app("Spotify").unwrap();
+        assert_eq!(
+            queue.drain_close_requests(),
+            vec![crate::domain::close::CloseRequest {
+                id,
+                reason: crate::domain::close::CloseReason::DismissedByUser,
+            }]
+        );
+    }
+
+    #[test]
     fn open_and_close_idempotent_and_preserve_state() {
         let queue = Queue::new();
         queue.push_with_outcome(
@@ -206,6 +273,8 @@ mod tests {
                 actions: vec![],
                 expire_ms: 0,
                 arrived_at_ms: 0,
+                stack_tag: None,
+                progress: None,
             },
         );
         let notices_before = queue.snapshot();
@@ -236,16 +305,13 @@ mod tests {
         let queue = Queue::new();
         let svc = ControlService { queue: queue.clone() };
 
-        // Silêncio automático por tela cheia ativo; executar open -> Continua fechada
         queue.set_quiet(true);
         svc.center_open();
         assert!(!queue.is_center_open());
 
-        // Sair da tela cheia após esse open -> Continua fechada; não agendar abertura
         queue.set_quiet(false);
         assert!(!queue.is_center_open());
 
-        // Apenas Não Perturbe manual ativo; executar open -> Abre a central, preservando Não Perturbe
         svc.dnd_on();
         assert_eq!(svc.dnd_status(), (true, false, true));
         svc.center_open();
@@ -263,7 +329,6 @@ mod tests {
         assert_eq!(svc.dnd_status(), (false, false, false));
         svc.dnd_toggle();
         assert_eq!(svc.dnd_status(), (true, false, true));
-        // Detector automático nunca é sobrescrito pelo controle manual.
         queue.set_quiet(true);
         svc.dnd_off();
         assert_eq!(svc.dnd_status(), (false, true, true));
@@ -291,13 +356,14 @@ mod tests {
                 actions: vec![],
                 expire_ms: 5000,
                 arrived_at_ms: 100,
+                stack_tag: None,
+                progress: Some(50),
             },
         );
         let svc = ControlService { queue };
         let list_json = svc.list();
         let history_json = svc.history();
 
-        // Validar que ambos são documentos JSON válidos em uma única linha
         assert!(!list_json.contains('\n'));
         assert!(!history_json.contains('\n'));
 
@@ -307,6 +373,7 @@ mod tests {
         assert_eq!(item["summary"], "Line 1\nLine 2");
         assert_eq!(item["body"], "Unicode café ☕ 🎉");
         assert_eq!(item["expire_ms"], 5000);
+        assert_eq!(item["progress"], 50);
         assert!(item.get("arrived_at_ms").is_none());
 
         let hist_val: serde_json::Value = serde_json::from_str(&history_json).expect("valid json");
@@ -315,6 +382,7 @@ mod tests {
         assert_eq!(hist_item["summary"], "Line 1\nLine 2");
         assert_eq!(hist_item["body"], "Unicode café ☕ 🎉");
         assert_eq!(hist_item["expire_ms"], 5000);
+        assert_eq!(hist_item["progress"], 50);
         assert_eq!(hist_item["seq"], 1);
         assert!(hist_item.get("arrived_at_ms").is_none());
     }
@@ -333,6 +401,8 @@ mod tests {
                 actions: vec![],
                 expire_ms: 1000,
                 arrived_at_ms: 1,
+                stack_tag: None,
+                progress: None,
             },
         );
         let o2 = queue.push_with_outcome(
@@ -346,10 +416,11 @@ mod tests {
                 actions: vec![],
                 expire_ms: 2000,
                 arrived_at_ms: 2,
+                stack_tag: None,
+                progress: None,
             },
         );
 
-        // Remove o item 1 da fila ativa
         queue.remove(o1.id);
 
         let svc = ControlService { queue: queue.clone() };
@@ -360,12 +431,10 @@ mod tests {
         let list_arr = list_val["notifications"].as_array().unwrap();
         let hist_arr = hist_val["notifications"].as_array().unwrap();
 
-        // Lista ativa deve conter apenas o item 2
         assert_eq!(list_arr.len(), 1);
         assert_eq!(list_arr[0]["id"], o2.id);
         assert_eq!(list_arr[0]["app"], "Second");
 
-        // Histórico deve conter ambos os itens, mais recente primeiro (Second, depois First)
         assert_eq!(hist_arr.len(), 2);
         assert_eq!(hist_arr[0]["id"], o2.id);
         assert_eq!(hist_arr[0]["app"], "Second");
@@ -390,6 +459,8 @@ mod tests {
                 actions: vec![],
                 expire_ms: 0,
                 arrived_at_ms: 0,
+                stack_tag: None,
+                progress: None,
             },
         );
         let svc = ControlService { queue: queue.clone() };

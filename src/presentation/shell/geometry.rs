@@ -195,6 +195,8 @@ mod tests {
             actions: vec![],
             expire_ms: 0,
             arrived_at_ms: 0,
+            stack_tag: None,
+            progress: None,
         }
     }
 
@@ -303,6 +305,29 @@ mod tests {
         let ds = decks(&notices, None);
         let (_, _, total) = deck_layout(&notices, &ds, &[]);
         assert_eq!(total, 0.);
+    }
+
+    #[test]
+    fn configured_slots_preserve_group_layout() {
+        use crate::application::config;
+        use crate::presentation::shell::window::visible_count;
+
+        let notices = (0..12).map(|i| mk(i + 1, if i < 6 { "A" } else { "B" })).collect::<Vec<_>>();
+        for slots in [1, 5, 12] {
+            let config = config::parse(&format!("max-visible={slots}")).unwrap();
+            for expanded in [None, Some("A"), Some("B")] {
+                let ds = decks(&notices, expanded);
+                let shown = shown_decks(&ds, visible_count(notices.len(), config.max_visible));
+                let (y, visible, total) = deck_layout(&notices, &ds, &shown);
+                let expected = slots.min(if expanded.is_some() { 7 } else { 2 });
+                assert_eq!(visible.iter().filter(|&&v| v).count(), expected);
+                assert_eq!(shown.iter().map(|deck| deck.indices.len()).sum::<usize>(), expected);
+                let positions =
+                    shown.iter().flat_map(|deck| &deck.indices).map(|&i| y[i]).collect::<Vec<_>>();
+                assert!(positions.windows(2).all(|pair| pair[1] - pair[0] >= CARD_H));
+                assert!(positions.iter().all(|&top| top + CARD_H <= total));
+            }
+        }
     }
 
     #[test]

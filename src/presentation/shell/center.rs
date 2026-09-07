@@ -1,6 +1,5 @@
 use std::ops::Range;
 
-/// Texto do botão de Não Perturbe + nota de tela cheia.
 pub fn dnd_button_label(manual: bool) -> &'static str {
     if manual { "Não Perturbe: on" } else { "Não Perturbe: off" }
 }
@@ -9,7 +8,6 @@ pub fn fullscreen_note(manual: bool, auto: bool) -> Option<&'static str> {
     if !manual && auto { Some("Silêncio ativo por tela cheia") } else { None }
 }
 
-/// Idade legível a partir do relógio monotônico (ms desde o boot do daemon).
 pub fn format_age(now_ms: u128, arrived_at_ms: u128) -> String {
     let elapsed_s = now_ms.saturating_sub(arrived_at_ms) / 1000;
     if elapsed_s < 5 {
@@ -95,7 +93,6 @@ pub fn utf8_range_for_utf16(text: &str, range: Range<usize>) -> Range<usize> {
     let mut start8 = 0;
     let mut end8 = 0;
     let mut count = 0;
-    // Round split surrogate pairs down, matching utf16_range_for_utf8.
     for (byte, ch) in text.char_indices().chain(std::iter::once((text.len(), '\0'))) {
         if count > end16 {
             break;

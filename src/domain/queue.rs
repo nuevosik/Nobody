@@ -2,10 +2,11 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+pub use crate::domain::action::ActionRequest;
 pub use crate::domain::close::{CloseReason, CloseRequest, PushOutcome};
 use crate::domain::history::{HISTORY_KEEP, HistoryEntry};
 use crate::domain::ids::{next_available_id, reserve_id};
-use crate::domain::notice::Notice;
+use crate::domain::notice::{Notice, is_valid_stack_tag};
 
 pub const KEEP: usize = 12;
 
@@ -13,6 +14,7 @@ pub const KEEP: usize = 12;
 pub struct Queue {
     inner: Arc<Mutex<VecDeque<Notice>>>,
     close_requests: Arc<Mutex<VecDeque<CloseRequest>>>,
+    action_requests: Arc<Mutex<VecDeque<ActionRequest>>>,
     next_id: Arc<AtomicU32>,
     quiet: Arc<AtomicBool>,
     history: Arc<Mutex<VecDeque<HistoryEntry>>>,
@@ -32,6 +34,7 @@ impl Queue {
         Self {
             inner: Arc::new(Mutex::new(VecDeque::new())),
             close_requests: Arc::new(Mutex::new(VecDeque::new())),
+            action_requests: Arc::new(Mutex::new(VecDeque::new())),
             next_id: Arc::new(AtomicU32::new(1)),
             quiet: Arc::new(AtomicBool::new(false)),
             history: Arc::new(Mutex::new(VecDeque::new())),
@@ -41,7 +44,6 @@ impl Queue {
         }
     }
 
-    /// Detector automático (tela cheia). Nunca toca a preferência manual.
     pub fn set_quiet(&self, quiet: bool) {
         self.quiet.store(quiet, Ordering::Relaxed);
         if quiet {
@@ -53,7 +55,6 @@ impl Queue {
         self.quiet.load(Ordering::Relaxed)
     }
 
-    /// Preferência manual de Não Perturbe (somente sessão).
     pub fn set_manual_quiet(&self, quiet: bool) {
         self.manual_quiet.store(quiet, Ordering::Relaxed);
     }
@@ -66,7 +67,6 @@ impl Queue {
         self.manual_quiet.load(Ordering::Relaxed)
     }
 
-    /// Silêncio efetivo = manual OU tela cheia.
     pub fn is_effective_quiet(&self) -> bool {
         self.is_manual_quiet() || self.is_quiet()
     }
@@ -91,7 +91,6 @@ impl Queue {
         self.history.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect()
     }
 
-    /// Limpa o histórico sem tocar na fila ativa nem emitir fechamentos.
     pub fn clear_history(&self) {
         self.history.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
@@ -122,11 +121,22 @@ impl Queue {
                 inner.remove(pos);
                 notice.id = replaces;
                 inner.push_front(notice.clone());
-                drop(inner);
                 self.record_history(replaces, notice);
                 return PushOutcome { id: replaces, evicted: Vec::new() };
             }
             reserve_id(&self.next_id, replaces);
+        } else if let Some(tag) = notice.stack_tag.as_deref()
+            && is_valid_stack_tag(tag)
+            && let Some(pos) = inner.iter().position(|current| {
+                current.app == notice.app && current.stack_tag.as_deref() == Some(tag)
+            })
+        {
+            let id = inner[pos].id;
+            inner.remove(pos);
+            notice.id = id;
+            inner.push_front(notice.clone());
+            self.record_history(id, notice);
+            return PushOutcome { id, evicted: Vec::new() };
         }
 
         let id = next_available_id(&self.next_id, &inner);
@@ -138,7 +148,6 @@ impl Queue {
                 evicted.push(notice);
             }
         }
-        drop(inner);
         self.record_history(0, notice);
         PushOutcome { id, evicted }
     }
@@ -189,6 +198,40 @@ impl Queue {
         self.close_requests.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect()
     }
 
+    pub fn request_action(&self, id: u32, key: &str) {
+        if id == 0 || key.is_empty() {
+            return;
+        }
+        if !self
+            .snapshot()
+            .iter()
+            .any(|notice| notice.id == id && (key != "default" || notice.has_default_action()))
+            || self.has_pending_close(id)
+        {
+            return;
+        }
+        let mut requests = self.action_requests.lock().unwrap_or_else(|e| e.into_inner());
+        if requests.iter().any(|request| request.id == id && request.key == key) {
+            return;
+        }
+        if requests.len() >= KEEP * 2 {
+            requests.pop_front();
+        }
+        requests.push_back(ActionRequest { id, key: key.to_string() });
+    }
+
+    pub fn drain_action_requests(&self) -> Vec<ActionRequest> {
+        self.action_requests.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect()
+    }
+
+    pub fn has_pending_close(&self, id: u32) -> bool {
+        self.close_requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|request| request.id == id)
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).len()
@@ -197,6 +240,9 @@ impl Queue {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
     use super::*;
     use crate::domain::notice::Notice;
 
@@ -210,6 +256,8 @@ mod tests {
             actions: vec![],
             expire_ms: 0,
             arrived_at_ms: 0,
+            stack_tag: None,
+            progress: None,
         }
     }
 
@@ -257,6 +305,185 @@ mod tests {
         assert_eq!(q.len(), 1);
         let id2 = push(&q, 0, mk(0, "B"));
         assert_ne!(id, id2);
+    }
+
+    #[test]
+    fn tag_replaces_active_notice_and_updates_one_history_entry() {
+        let q = Queue::new();
+        let mut first = mk(0, "Mixer");
+        first.summary = "old".into();
+        first.expire_ms = 1_000;
+        first.arrived_at_ms = 10;
+        first.stack_tag = Some("volume".into());
+        let id = push(&q, 0, first);
+
+        let mut updated = mk(0, "Mixer");
+        updated.summary = "new".into();
+        updated.expire_ms = 2_000;
+        updated.arrived_at_ms = 20;
+        updated.stack_tag = Some("volume".into());
+        assert_eq!(push(&q, 0, updated), id);
+
+        let active = q.snapshot();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, id);
+        assert_eq!(active[0].summary, "new");
+        assert_eq!(active[0].expire_ms, 2_000);
+        assert_eq!(active[0].arrived_at_ms, 20);
+        assert_eq!(q.history_snapshot().len(), 1);
+        assert_eq!(q.history_snapshot()[0].notice.summary, "new");
+    }
+
+    #[test]
+    fn tags_match_app_and_distinguish_other_tags_or_missing_tags() {
+        let q = Queue::new();
+        let mut first = mk(0, "Mixer");
+        first.stack_tag = Some("volume".into());
+        let first_id = push(&q, 0, first);
+
+        let mut other_app = mk(0, "Player");
+        other_app.stack_tag = Some("volume".into());
+        let other_app_id = push(&q, 0, other_app);
+
+        let mut other_tag = mk(0, "Mixer");
+        other_tag.stack_tag = Some("brightness".into());
+        let other_tag_id = push(&q, 0, other_tag);
+
+        let no_tag_id = push(&q, 0, mk(0, "Mixer"));
+        let another_no_tag_id = push(&q, 0, mk(0, "Mixer"));
+
+        assert_eq!(q.snapshot().len(), 5);
+        assert_eq!(
+            [first_id, other_app_id, other_tag_id, no_tag_id, another_no_tag_id]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn explicit_replacement_wins_and_tag_uses_new_value_and_most_recent_notice() {
+        let q = Queue::new();
+        let mut initial = mk(0, "Mixer");
+        initial.stack_tag = Some("old".into());
+        let id = push(&q, 0, initial);
+
+        let mut explicit = mk(0, "Mixer");
+        explicit.summary = "explicit".into();
+        explicit.stack_tag = Some("new".into());
+        assert_eq!(push(&q, id, explicit), id);
+
+        let mut old_tag = mk(0, "Mixer");
+        old_tag.stack_tag = Some("old".into());
+        let old_id = push(&q, 0, old_tag);
+        assert_ne!(old_id, id);
+
+        let mut explicit_missing = mk(0, "Mixer");
+        explicit_missing.summary = "explicit missing".into();
+        explicit_missing.stack_tag = Some("new".into());
+        let duplicate_id = push(&q, 999_999, explicit_missing);
+        assert_ne!(duplicate_id, id);
+        assert_ne!(duplicate_id, 999_999);
+
+        let mut by_tag = mk(0, "Mixer");
+        by_tag.summary = "by tag".into();
+        by_tag.stack_tag = Some("new".into());
+        assert_eq!(push(&q, 0, by_tag), duplicate_id);
+
+        assert_eq!(q.snapshot().len(), 3);
+        assert_eq!(q.snapshot()[0].id, duplicate_id);
+        assert_eq!(q.snapshot()[0].summary, "by tag");
+        assert_eq!(q.history_snapshot().len(), 3);
+
+        assert_eq!(push(&q, duplicate_id, mk(0, "Mixer")), duplicate_id);
+        let mut after_removed_tag = mk(0, "Mixer");
+        after_removed_tag.stack_tag = Some("new".into());
+        let after_removed_tag_id = push(&q, 0, after_removed_tag);
+        assert_ne!(after_removed_tag_id, duplicate_id);
+    }
+
+    #[test]
+    fn action_requests_require_current_default_and_deduplicate_before_flush() {
+        let q = Queue::new();
+        let mut notice = mk(0, "App");
+        notice.actions = vec!["default".into(), "Abrir".into()];
+        let id = push(&q, 0, notice);
+
+        q.request_action(id, "default");
+        q.request_action(id, "default");
+        assert_eq!(q.drain_action_requests(), vec![ActionRequest { id, key: "default".into() }]);
+
+        q.request_close(id, CloseReason::DismissedByUser);
+        q.request_action(id, "default");
+        assert!(q.drain_action_requests().is_empty());
+    }
+
+    #[test]
+    fn replacement_removing_default_invalidates_a_pending_action() {
+        let q = Queue::new();
+        let mut notice = mk(0, "App");
+        notice.actions = vec!["default".into(), "Abrir".into()];
+        let id = push(&q, 0, notice);
+        q.request_action(id, "default");
+        assert_eq!(q.drain_action_requests().len(), 1);
+
+        let replacement = mk(0, "App");
+        assert_eq!(push(&q, id, replacement), id);
+        let active = q.snapshot();
+        assert!(!active[0].has_default_action());
+    }
+
+    #[test]
+    fn expired_or_removed_tag_notice_is_not_resurrected() {
+        let q = Queue::new();
+        let mut expired = mk(0, "Mixer");
+        expired.stack_tag = Some("volume".into());
+        expired.expire_ms = 10;
+        expired.arrived_at_ms = 100;
+        let old_id = push(&q, 0, expired);
+        assert_eq!(q.remove_expired_at(110).len(), 1);
+
+        let mut replacement = mk(0, "Mixer");
+        replacement.stack_tag = Some("volume".into());
+        let new_id = push(&q, 0, replacement);
+        assert_ne!(new_id, old_id);
+        assert_eq!(q.history_snapshot().len(), 2);
+        assert_eq!(q.history_snapshot()[1].notice.id, old_id);
+
+        q.remove(new_id);
+        let mut after_remove = mk(0, "Mixer");
+        after_remove.stack_tag = Some("volume".into());
+        let final_id = push(&q, 0, after_remove);
+        assert_ne!(final_id, new_id);
+        assert_eq!(q.history_snapshot().len(), 3);
+    }
+
+    #[test]
+    fn concurrent_same_tag_insertions_leave_one_active_and_historical_notice() {
+        let q = Queue::new();
+        let workers = 16;
+        let barrier = Arc::new(Barrier::new(workers));
+        let handles = (0..workers)
+            .map(|i| {
+                let q = q.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    let mut notice = mk(0, "Mixer");
+                    notice.summary = format!("summary-{i}");
+                    notice.stack_tag = Some("volume".into());
+                    barrier.wait();
+                    q.push_with_outcome(0, notice)
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().expect("tag insertion thread");
+        }
+
+        assert_eq!(q.snapshot().len(), 1);
+        assert_eq!(q.history_snapshot().len(), 1);
+        assert!(q.snapshot()[0].summary.starts_with("summary-"));
     }
 
     #[test]
@@ -480,7 +707,6 @@ mod tests {
             q.set_quiet(auto);
             assert_eq!(q.is_effective_quiet(), manual || auto, "manual={manual} auto={auto}");
         }
-        // Detector nunca sobrescreve a preferência manual.
         q.set_manual_quiet(true);
         q.set_quiet(false);
         assert!(q.is_manual_quiet());

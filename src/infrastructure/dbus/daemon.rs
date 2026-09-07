@@ -4,14 +4,14 @@ use zbus::interface;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::OwnedValue;
 
-use crate::application::{clock, commands, policy};
+use crate::application::{clock, commands, config::Config, policy};
 use crate::domain::close::CloseReason;
 use crate::domain::notice::Notice;
 use crate::domain::queue::Queue;
 use crate::infrastructure::dbus::markup::strip_markup;
 use crate::infrastructure::dbus::validation::{
-    MAX_ACTION_LEN, MAX_ACTIONS, MAX_BODY_LEN, MAX_HINTS, MAX_ICON_LEN, MAX_SUMMARY_LEN,
-    is_critical, truncate,
+    MAX_BODY_LEN, MAX_HINTS, MAX_ICON_LEN, MAX_SUMMARY_LEN, actions as parse_actions, is_critical,
+    progress, stack_tag, truncate,
 };
 use crate::infrastructure::icons::resolve_notice_icon;
 
@@ -19,6 +19,7 @@ pub const NOTIFICATION_PATH: &str = "/org/freedesktop/Notifications";
 
 pub struct NotificationDaemon {
     pub queue: Queue,
+    pub config: Config,
 }
 
 #[interface(name = "org.freedesktop.Notifications")]
@@ -48,12 +49,9 @@ impl NotificationDaemon {
             truncate(app_name.trim(), 64)
         };
 
-        let mut actions = actions;
-        if actions.len() > MAX_ACTIONS {
-            actions.truncate(MAX_ACTIONS);
-        }
-        let actions: Vec<String> =
-            actions.into_iter().map(|a| truncate(&a, MAX_ACTION_LEN)).collect();
+        let actions = parse_actions(&actions);
+        let tag = stack_tag(&hints);
+        let progress = progress(&hints);
         let hints_limited: HashMap<String, OwnedValue> = if hints.len() > MAX_HINTS {
             hints.into_iter().take(MAX_HINTS).collect()
         } else {
@@ -78,8 +76,14 @@ impl NotificationDaemon {
             body,
             icon,
             actions,
-            expire_ms: policy::effective_expire_timeout(expire_timeout, is_crit),
+            expire_ms: policy::effective_expire_timeout_with_default(
+                expire_timeout,
+                is_crit,
+                self.config.default_timeout_ms,
+            ),
             arrived_at_ms: clock::now_ms(),
+            stack_tag: tag,
+            progress,
         };
         let outcome = self.queue.push_with_outcome(replaces_id, notice);
 
@@ -103,7 +107,13 @@ impl NotificationDaemon {
     }
 
     pub fn get_capabilities(&self) -> Vec<String> {
-        vec!["body".into(), "icon-static".into()]
+        vec![
+            "body".into(),
+            "icon-static".into(),
+            "x-dunst-stack-tag".into(),
+            "x-canonical-private-synchronous".into(),
+            "value".into(),
+        ]
     }
 
     fn get_server_information(&self) -> (String, String, String, String) {
@@ -133,6 +143,14 @@ pub(crate) async fn emit_notification_closed(
     NotificationDaemon::notification_closed(emitter, id, reason.code()).await
 }
 
+pub(crate) async fn emit_action_invoked(
+    emitter: &SignalEmitter<'_>,
+    id: u32,
+    action_key: &str,
+) -> zbus::Result<()> {
+    NotificationDaemon::action_invoked(emitter, id, action_key).await
+}
+
 async fn emit_closed_for_call(
     emitter: &SignalEmitter<'_>,
     id: u32,
@@ -149,20 +167,26 @@ mod tests {
 
     #[test]
     fn reports_only_supported_capabilities() {
-        let daemon = NotificationDaemon { queue: Queue::new() };
+        let daemon = NotificationDaemon { queue: Queue::new(), config: Config::default() };
         let caps = daemon.get_capabilities();
         assert!(caps.contains(&"body".to_string()));
         assert!(caps.contains(&"icon-static".to_string()));
+        assert!(caps.contains(&"x-dunst-stack-tag".to_string()));
+        assert!(caps.contains(&"x-canonical-private-synchronous".to_string()));
+        assert!(caps.contains(&"value".to_string()));
         assert!(!caps.contains(&"actions".to_string()));
         assert!(!caps.contains(&"body-markup".to_string()));
     }
 
     #[test]
     fn does_not_advertise_unsupported_capabilities() {
-        let daemon = NotificationDaemon { queue: Queue::new() };
+        let daemon = NotificationDaemon { queue: Queue::new(), config: Config::default() };
         let caps = daemon.get_capabilities();
         assert!(caps.contains(&"body".to_string()));
         assert!(caps.contains(&"icon-static".to_string()));
+        assert!(caps.contains(&"x-dunst-stack-tag".to_string()));
+        assert!(caps.contains(&"x-canonical-private-synchronous".to_string()));
+        assert!(caps.contains(&"value".to_string()));
         assert!(!caps.contains(&"body-markup".to_string()));
         assert!(!caps.contains(&"actions".to_string()));
     }

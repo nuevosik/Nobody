@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Cut a release: bump version, tag, push. GitHub Actions builds the artifact.
-#   ./scripts/release.sh 0.1.1
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

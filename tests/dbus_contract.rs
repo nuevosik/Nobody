@@ -4,7 +4,7 @@ use std::sync::{Mutex, OnceLock};
 
 use zbus::zvariant::{OwnedValue, Value};
 
-use nobody::application::{commands, policy};
+use nobody::application::{commands, config::Config, policy};
 use nobody::domain::notice::Notice;
 use nobody::domain::queue::Queue;
 use nobody::infrastructure::dbus::daemon::NotificationDaemon;
@@ -15,11 +15,14 @@ use nobody::infrastructure::dbus::validation::{
 use nobody::infrastructure::icons::{resolve_named_icon, resolve_notice_icon};
 
 #[test]
-fn caps_are_body_and_icon_static_only() {
-    let d = NotificationDaemon { queue: Queue::new() };
+fn caps_include_supported_stack_tag_extensions() {
+    let d = NotificationDaemon { queue: Queue::new(), config: Config::default() };
     let caps = d.get_capabilities();
     assert!(caps.contains(&"body".to_string()));
     assert!(caps.contains(&"icon-static".to_string()));
+    assert!(caps.contains(&"x-dunst-stack-tag".to_string()));
+    assert!(caps.contains(&"x-canonical-private-synchronous".to_string()));
+    assert!(caps.contains(&"value".to_string()));
     assert!(!caps.contains(&"actions".to_string()));
     assert!(!caps.contains(&"body-markup".to_string()));
 }
@@ -64,10 +67,6 @@ fn icon_lookup_scoped_and_desktop_fallback_safe() {
     assert!(resolve_notice_icon("", "no-such-app-xyz987", &hints).is_none());
 }
 
-/// Serializes tests sharing the process-global icon cache (and the XDG env):
-/// a flood/eviction run must not wipe another test's cached entry mid-assert.
-/// Integration binaries are separate processes, so this only orders threads
-/// inside this binary.
 fn infra_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -92,8 +91,6 @@ fn str_hint(value: &str) -> OwnedValue {
     OwnedValue::try_from(Value::from(value)).unwrap()
 }
 
-/// Restores XDG_DATA_HOME/XDG_DATA_DIRS on drop so a panicking assert cannot
-/// leak mutated env into other tests in this binary.
 struct XdgGuard {
     home: Option<std::ffi::OsString>,
     dirs: Option<std::ffi::OsString>,
@@ -128,8 +125,6 @@ impl Drop for XdgGuard {
     }
 }
 
-// --- cache.rs (via public resolve_named_icon; absolute paths need no XDG) ---
-
 #[test]
 fn icon_cache_hit_serves_deleted_absolute_path() {
     let _guard = infra_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -138,19 +133,12 @@ fn icon_cache_hit_serves_deleted_absolute_path() {
     let key = path.to_str().unwrap().to_string();
     assert_eq!(resolve_named_icon(&key), Some(path.clone()));
     std::fs::remove_file(&path).unwrap();
-    // Positive hits are cached: file is gone but the cached path is served.
     assert_eq!(resolve_named_icon(&key), Some(path));
 }
 
 #[test]
 fn icon_cache_evicts_stale_entries_under_pressure() {
     let _guard = infra_lock().lock().unwrap_or_else(|e| e.into_inner());
-    // Seed several cached positives, then delete their files: each re-lookup
-    // returns None iff that entry was evicted (lookup itself must miss).
-    // Eviction removes the first 64 keys in HashMap iteration order, whose
-    // bucket positions are hash-dependent, so per-entry eviction is NOT
-    // deterministic — but over a dozen seeds at least one is evicted with
-    // overwhelming probability, while with eviction disabled all survive.
     let mut keys = Vec::new();
     for i in 0..12 {
         let path = std::env::temp_dir().join(format!("{}.png", uniq(&format!("seed{i}"))));
@@ -162,8 +150,6 @@ fn icon_cache_evicts_stale_entries_under_pressure() {
         keys.push(key);
     }
 
-    // Push ~6000 unique misses through the 256-entry cap (~90 eviction
-    // cycles of 64-for-64 replacement).
     let flood = uniq("flood");
     for i in 0..6000 {
         assert!(resolve_named_icon(&format!("/tmp/{flood}-{i}.png")).is_none());
@@ -171,7 +157,6 @@ fn icon_cache_evicts_stale_entries_under_pressure() {
     let evicted = keys.iter().filter(|k| resolve_named_icon(k).is_none()).count();
     assert!(evicted >= 1, "cap must evict: all {} stale entries survived 6000 inserts", keys.len());
 
-    // Cache still functional at cap: a fresh file resolves.
     let fresh = std::env::temp_dir().join(format!("{}.png", uniq("fresh")));
     write_png(&fresh);
     let fresh_key = fresh.to_str().unwrap().to_string();
@@ -179,8 +164,6 @@ fn icon_cache_evicts_stale_entries_under_pressure() {
     std::fs::remove_file(&fresh).ok();
     assert_eq!(got, Some(fresh));
 }
-
-// --- resolver.rs priority + rejection (public resolve_notice_icon) ---
 
 #[test]
 fn resolve_hint_image_path_beats_app_icon_and_app() {
@@ -202,7 +185,6 @@ fn resolve_hint_image_path_beats_app_icon_and_app() {
         let hints = HashMap::from([(key.to_string(), str_hint(&h))]);
         assert_eq!(resolve_notice_icon(&a, &p, &hints), Some(hint_p.clone()), "key {key}");
     }
-    // A missing hint file falls through to app_icon, not to None.
     let ghost = format!("/tmp/{}-ghost.png", uniq("ghost"));
     let hints = HashMap::from([("image-path".to_string(), str_hint(&ghost))]);
     assert_eq!(resolve_notice_icon(&a, &p, &hints), Some(icon_p.clone()));
@@ -241,20 +223,16 @@ fn resolve_hint_rejects_bad_values_and_names() {
     let real = real_p.to_str().unwrap().to_string();
     let missing = format!("{}-missing", uniq("miss2"));
 
-    // file:// prefix is stripped, so a hint URI resolves to the real file.
     let hints = HashMap::from([("image-path".to_string(), str_hint(&format!("file://{real}")))]);
     assert_eq!(resolve_notice_icon(&missing, &missing, &hints), Some(real_p.clone()));
 
-    // Traversal / backslash / empty / wrong-type hints are ignored.
     for bad in ["../../etc/passwd", "..\\..\\windows", "", "a/b"] {
         let hints = HashMap::from([("image-path".to_string(), str_hint(bad))]);
         assert!(resolve_notice_icon(&missing, &missing, &hints).is_none(), "hint {bad}");
     }
     let hints = HashMap::from([("image-path".to_string(), OwnedValue::from(2_u8))]);
     assert!(resolve_notice_icon(&missing, &missing, &hints).is_none());
-    // Oversized app_icon (>512) is rejected before any lookup.
     assert!(resolve_notice_icon(&"a".repeat(600), &missing, &hints).is_none());
-    // Traversal desktop-entry with nothing else hitting resolves to None.
     let hints = HashMap::from([("desktop-entry".to_string(), str_hint("../../etc/passwd"))]);
     assert!(resolve_notice_icon(&missing, &missing, &hints).is_none());
 
@@ -286,17 +264,12 @@ fn resolve_desktop_entry_beats_app_loses_to_app_icon() {
     let missing = format!("{tag}-missing");
 
     let _xdg = XdgGuard::set(&base);
-    // desktop-entry resolves through the .desktop Icon= key …
     let hints = HashMap::from([("desktop-entry".to_string(), str_hint(&entry_id))]);
     assert_eq!(resolve_notice_icon(&missing, &missing, &hints), Some(expected.clone()));
-    // … beats the app-name fallback …
     assert_eq!(resolve_notice_icon(&missing, &fb_name, &hints), Some(expected.clone()));
-    // … but loses to an explicit app_icon path.
     assert_eq!(resolve_notice_icon(&override_s, &fb_name, &hints), Some(override_p.clone()));
-    // Underscore spelling works the same way.
     let hints2 = HashMap::from([("desktop_entry".to_string(), str_hint(&entry_id))]);
     assert_eq!(resolve_notice_icon(&missing, &missing, &hints2), Some(expected));
-    // image-path hint outranks desktop-entry.
     let hints3 = HashMap::from([
         ("image-path".to_string(), str_hint(&override_s)),
         ("desktop-entry".to_string(), str_hint(&entry_id)),
@@ -307,16 +280,12 @@ fn resolve_desktop_entry_beats_app_loses_to_app_icon() {
     std::fs::remove_dir_all(&base).ok();
 }
 
-// --- daemon.rs Notify-pipeline gaps drivable without a bus ---
-
 #[test]
 fn notify_pipeline_strips_markup_then_truncates_to_caps() {
     assert_eq!(MAX_SUMMARY_LEN, 200);
     assert_eq!(MAX_BODY_LEN, 500);
-    // Strip-first: markup must not consume the char budget.
     let cooked = truncate(&strip_markup(&format!("<b>{}</b>", "x".repeat(200))), MAX_SUMMARY_LEN);
     assert_eq!(cooked, "x".repeat(200));
-    // Multi-byte chars respect char (not byte) boundaries after stripping.
     let summary = truncate(&strip_markup(&format!("<b>{}</b>", "é".repeat(250))), MAX_SUMMARY_LEN);
     assert_eq!(summary.chars().count(), 200);
     assert!(!summary.contains('<'));
@@ -333,6 +302,9 @@ fn notify_pipeline_policy_pins_expire_contract() {
     assert_eq!(policy::effective_expire_timeout(2_500, true), 0);
     assert_eq!(policy::effective_expire_timeout(-1, true), 0);
     assert_eq!(policy::effective_expire_timeout(0, true), 0);
+    assert_eq!(policy::effective_expire_timeout_with_default(-1, false, 123), 123);
+    assert_eq!(policy::effective_expire_timeout_with_default(0, false, 123), 0);
+    assert_eq!(policy::effective_expire_timeout_with_default(2_500, false, 123), 2_500);
 }
 
 #[test]
@@ -371,6 +343,8 @@ fn notify_pipeline_expire_runs_before_push() {
             actions: vec![],
             expire_ms: 10,
             arrived_at_ms: 100,
+            stack_tag: None,
+            progress: None,
         },
     );
     let expired = commands::expire(&q, 1_000);
@@ -388,6 +362,8 @@ fn notify_pipeline_expire_runs_before_push() {
             actions: vec![],
             expire_ms: 0,
             arrived_at_ms: 0,
+            stack_tag: None,
+            progress: None,
         },
     );
     assert_eq!(q.snapshot().len(), 1);

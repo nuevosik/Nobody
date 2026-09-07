@@ -5,6 +5,7 @@ use gpui_platform::application;
 
 use nobody::application::cli::{self, Cli};
 use nobody::domain::queue::Queue;
+use nobody::infrastructure::config;
 use nobody::infrastructure::dbus::{control, host};
 use nobody::infrastructure::fullscreen;
 use nobody::presentation::shell;
@@ -18,6 +19,8 @@ fn run_control(cli: Cli) -> i32 {
         Cli::CenterOpen => control::center_open(),
         Cli::CenterClose => control::center_close(),
         Cli::CenterToggle => control::center_toggle(),
+        Cli::Dismiss(id) => control::dismiss(id),
+        Cli::DismissApp(app) => control::dismiss_app(&app),
         Cli::ListJson => match control::list_json() {
             Ok(json) => {
                 println!("{json}");
@@ -66,14 +69,16 @@ fn run_control(cli: Cli) -> i32 {
 fn run_daemon() {
     application().run(|cx: &mut App| {
         let queue = Queue::new();
+        let runtime_config = config::load();
 
         let host_queue = queue.clone();
+        let host_config = runtime_config;
         cx.spawn(async move |cx: &mut AsyncApp| {
-            let Some(conn) = host::serve(host_queue.clone()).await else {
+            let Some(conn) = host::serve(host_queue.clone(), host_config).await else {
                 return;
             };
             loop {
-                host::flush_lifecycle_events(&conn, &host_queue).await;
+                host::flush_lifecycle_events(&conn).await;
                 cx.background_executor().timer(Duration::from_millis(100)).await;
             }
         })
@@ -89,7 +94,7 @@ fn run_daemon() {
         })
         .detach();
 
-        if let Err(e) = shell::open_window(cx, queue) {
+        if let Err(e) = shell::open_window(cx, queue, runtime_config) {
             eprintln!("nobody: falha ao abrir janela LayerShell: {e:#}");
             std::process::exit(1);
         }

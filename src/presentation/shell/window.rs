@@ -8,6 +8,7 @@ use gpui::{
     WindowKind, WindowOptions, div, layer_shell::*, point, prelude::*, px, size,
 };
 
+use crate::application::config::{Anchor as ConfigAnchor, Config};
 use crate::application::{clock, commands};
 use crate::domain::queue::Queue;
 use crate::presentation::theme::{
@@ -17,22 +18,23 @@ use crate::presentation::theme::{
 
 use super::{anim, center, feed, geometry, popup};
 
-pub(crate) const MAX_VISIBLE: usize = 5;
 pub(crate) const PANEL_H: f32 = 480.;
 
-pub(crate) fn visible_count(n: usize) -> usize {
-    n.min(MAX_VISIBLE)
+pub(crate) fn visible_count(n: usize, max_visible: usize) -> usize {
+    n.min(max_visible)
 }
 
 pub struct NotificationStack {
     stack: feed::Stack,
     exiting: Vec<feed::Exiting>,
     queue: Queue,
+    max_visible: usize,
     quiet: bool,
     center_open: bool,
     center_query: String,
     center_marked: Option<Range<usize>>,
     search_focus: gpui::FocusHandle,
+    popup_focus: gpui::FocusHandle,
     center_focus_armed: bool,
     dnd_manual: bool,
     dnd_auto: bool,
@@ -62,7 +64,7 @@ pub(crate) fn hover_expand(current: Option<&str>, app: &str, hovered: bool) -> O
 }
 
 impl NotificationStack {
-    pub fn new(cx: &mut Context<Self>, queue: Queue) -> Self {
+    pub fn new(cx: &mut Context<Self>, queue: Queue, max_visible: usize) -> Self {
         spawn_anim_ticker(cx);
         spawn_feed_sync(queue.clone(), cx);
 
@@ -70,11 +72,13 @@ impl NotificationStack {
             stack: feed::Stack::default(),
             exiting: Vec::new(),
             queue,
+            max_visible,
             quiet: false,
             center_open: false,
             center_query: String::new(),
             center_marked: None,
             search_focus: cx.focus_handle().tab_stop(true).tab_index(3),
+            popup_focus: cx.focus_handle().tab_stop(false).tab_index(0),
             center_focus_armed: false,
             dnd_manual: false,
             dnd_auto: false,
@@ -91,6 +95,10 @@ impl NotificationStack {
 
     fn dismiss(&self, id: u32) {
         commands::request_dismissal(&self.queue, id);
+    }
+
+    fn default_action(&self, id: u32) {
+        commands::request_default_action(&self.queue, id);
     }
 
     fn close_center(&self) {
@@ -690,7 +698,7 @@ fn spawn_feed_sync(queue: Queue, cx: &mut Context<NotificationStack>) {
                     let center = commands::center_open(&stack.queue);
                     let center_flipped = center != stack.center_open;
                     stack.center_open = center;
-                    if center_flipped && !center {
+                    if center_flipped {
                         stack.center_focus_armed = false;
                     }
                     if changed || flipped || center_flipped || dnd_changed {
@@ -749,7 +757,7 @@ impl gpui::Render for NotificationStack {
                 .into_any_element();
         }
 
-        let n = visible_count(self.stack.notices.len());
+        let n = visible_count(self.stack.notices.len(), self.max_visible);
         let card_h = CARD_H;
 
         let exiting_alive: Vec<&feed::Exiting> =
@@ -815,6 +823,11 @@ impl gpui::Render for NotificationStack {
             total_h,
         );
 
+        if !shown.is_empty() && !self.popup_focus.contains_focused(window, cx) {
+            // Recover focus after a focused card disappears or the central closes.
+            window.focus(&self.popup_focus, cx);
+        }
+
         let announcement = self
             .stack
             .notices
@@ -823,10 +836,30 @@ impl gpui::Render for NotificationStack {
             .unwrap_or_default();
 
         div()
+            .id("popup")
+            .track_focus(&self.popup_focus)
+            .tab_group()
+            .tab_stop(false)
             .size_full()
             .relative()
             .font_family(FONT)
             .text_size(px(11.))
+            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
+                let modifiers = &event.keystroke.modifiers;
+                let clean = !modifiers.control
+                    && !modifiers.alt
+                    && !modifiers.platform
+                    && !modifiers.function;
+                if clean && event.keystroke.key == "tab" {
+                    if modifiers.shift {
+                        window.focus_prev(cx);
+                    } else {
+                        window.focus_next(cx);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .child(
                 div()
                     .id("a11y-live")
@@ -910,7 +943,7 @@ impl gpui::Render for NotificationStack {
                             .overflow_hidden()
                             .opacity(opacity)
                             .cursor_pointer()
-                            .focusable()
+                            .tab_index((slot * 2) as isize)
                             .role(gpui::accesskit::Role::Button)
                             .aria_label(popup::a11y_label(notice))
                             .aria_keyshortcuts("Enter Space Escape")
@@ -941,6 +974,45 @@ impl gpui::Render for NotificationStack {
                             .px(px(10.))
                             .child(popup::badge(notice.icon.as_ref(), &notice.app))
                             .child(popup::card_content(notice));
+                        if notice.has_default_action() {
+                            let action_id = notice_id;
+                            card = card.child(
+                                div()
+                                    .id(("default-action", action_id))
+                                    .tab_index((slot * 2 + 1) as isize)
+                                    .role(Role::Button)
+                                    .aria_label("Abrir")
+                                    .aria_keyshortcuts("Enter Space")
+                                    .cursor_pointer()
+                                    .px(px(8.))
+                                    .py(px(4.))
+                                    .rounded(px(6.))
+                                    .bg(fade(CHIP, 1.))
+                                    .text_color(fade(TEXT, 0.95))
+                                    .focus_visible(|s| s.border_2().border_color(fade(ACCENT, 1.)))
+                                    .child("Abrir")
+                                    .on_click(cx.listener(move |stack, _, _, cx| {
+                                        cx.stop_propagation();
+                                        stack.default_action(action_id);
+                                        cx.notify();
+                                    }))
+                                    .on_key_down(cx.listener(
+                                        move |stack, event: &gpui::KeyDownEvent, _, cx| {
+                                            if event.keystroke.modifiers.modified() {
+                                                return;
+                                            }
+                                            if matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            ) {
+                                                cx.stop_propagation();
+                                                stack.default_action(action_id);
+                                                cx.notify();
+                                            }
+                                        },
+                                    )),
+                            );
+                        }
                         if hidden > 0 {
                             card = card.child(more_chip(hidden));
                         }
@@ -1011,7 +1083,11 @@ fn more_chip(hidden: usize) -> gpui::Div {
         .child(format!("+{hidden}"))
 }
 
-pub fn open_window(cx: &mut gpui::App, queue: Queue) -> anyhow::Result<()> {
+pub fn open_window(cx: &mut gpui::App, queue: Queue, config: Config) -> anyhow::Result<()> {
+    let anchor = match config.anchor {
+        ConfigAnchor::TopRight => Anchor::TOP | Anchor::RIGHT,
+        ConfigAnchor::TopLeft => Anchor::TOP | Anchor::LEFT,
+    };
     cx.open_window(
         WindowOptions {
             titlebar: None,
@@ -1024,7 +1100,7 @@ pub fn open_window(cx: &mut gpui::App, queue: Queue) -> anyhow::Result<()> {
             kind: WindowKind::LayerShell(LayerShellOptions {
                 namespace: "nobody".to_string(),
                 layer: Layer::Overlay,
-                anchor: Anchor::TOP | Anchor::RIGHT,
+                anchor,
                 exclusive_zone: Some(px(0.)),
                 exclusive_edge: None,
                 keyboard_interactivity: KeyboardInteractivity::OnDemand,
@@ -1032,7 +1108,7 @@ pub fn open_window(cx: &mut gpui::App, queue: Queue) -> anyhow::Result<()> {
             }),
             ..Default::default()
         },
-        move |_, cx| cx.new(|cx| NotificationStack::new(cx, queue)),
+        move |_, cx| cx.new(|cx| NotificationStack::new(cx, queue, config.max_visible)),
     )?;
     Ok(())
 }
@@ -1080,16 +1156,16 @@ mod tests {
 
     #[test]
     fn visible_count_pins_cap() {
-        assert_eq!(MAX_VISIBLE, 5);
-        assert_eq!(visible_count(0), 0);
-        assert_eq!(visible_count(1), 1);
-        assert_eq!(visible_count(5), 5);
-        assert_eq!(visible_count(6), 5);
-        assert_eq!(visible_count(12), 5);
+        assert_eq!(visible_count(0, 5), 0);
+        assert_eq!(visible_count(1, 5), 1);
+        assert_eq!(visible_count(5, 5), 5);
+        assert_eq!(visible_count(6, 5), 5);
+        assert_eq!(visible_count(12, 5), 5);
     }
 
     #[test]
     fn visible_count_caps_full_queue() {
-        assert_eq!(visible_count(KEEP), MAX_VISIBLE);
+        assert_eq!(visible_count(KEEP, 5), 5);
+        assert_eq!(visible_count(KEEP, 12), KEEP);
     }
 }

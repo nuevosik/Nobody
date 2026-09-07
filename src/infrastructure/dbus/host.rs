@@ -1,12 +1,12 @@
 use zbus::fdo::RequestNameReply;
 
-use crate::application::{clock, commands};
+use crate::application::{clock, commands, config::Config};
 use crate::domain::close::CloseReason;
 use crate::domain::queue::Queue;
 use crate::infrastructure::dbus::control::{CONTROL_PATH, ControlService};
 use crate::infrastructure::dbus::daemon::{self, NOTIFICATION_PATH, NotificationDaemon};
 
-pub async fn serve(queue: Queue) -> Option<zbus::Connection> {
+pub async fn serve(queue: Queue, config: Config) -> Option<zbus::Connection> {
     let conn = match zbus::Connection::session().await {
         Ok(c) => c,
         Err(e) => {
@@ -17,7 +17,7 @@ pub async fn serve(queue: Queue) -> Option<zbus::Connection> {
         }
     };
 
-    let daemon = NotificationDaemon { queue: queue.clone() };
+    let daemon = NotificationDaemon { queue: queue.clone(), config };
     if let Err(e) = conn.object_server().at(NOTIFICATION_PATH, daemon).await {
         eprintln!("nobody: register interface: {e}");
         return None;
@@ -47,7 +47,7 @@ pub async fn serve(queue: Queue) -> Option<zbus::Connection> {
     Some(conn)
 }
 
-pub async fn flush_lifecycle_events(connection: &zbus::Connection, queue: &Queue) {
+pub async fn flush_lifecycle_events(connection: &zbus::Connection) {
     let interface = match connection
         .object_server()
         .interface::<_, NotificationDaemon>(NOTIFICATION_PATH)
@@ -59,6 +59,11 @@ pub async fn flush_lifecycle_events(connection: &zbus::Connection, queue: &Queue
             return;
         }
     };
+
+    // Serialize validation, signals and removal with Notify/CloseNotification.
+    // ponytail: one interface lock; use per-ID serialization if signal I/O becomes a bottleneck.
+    let daemon = interface.get_mut().await;
+    let queue = &daemon.queue;
 
     for notice in commands::expire(queue, clock::now_ms()) {
         if let Err(error) = daemon::emit_notification_closed(
@@ -79,6 +84,39 @@ pub async fn flush_lifecycle_events(connection: &zbus::Connection, queue: &Queue
         if let Err(error) =
             daemon::emit_notification_closed(interface.signal_emitter(), request.id, request.reason)
                 .await
+        {
+            eprintln!("nobody: falha ao sinalizar fechamento de {}: {error}", request.id);
+        }
+    }
+
+    for request in queue.drain_action_requests() {
+        if queue.has_pending_close(request.id) {
+            continue;
+        }
+        let active_default = queue.snapshot().into_iter().find(|notice| {
+            notice.id == request.id
+                && request.key == "default"
+                && notice.has_default_action()
+                && !notice.is_expired_at(clock::now_ms())
+        });
+        if active_default.is_none() {
+            continue;
+        }
+        if let Err(error) =
+            daemon::emit_action_invoked(interface.signal_emitter(), request.id, &request.key).await
+        {
+            eprintln!("nobody: falha ao sinalizar ação de {}: {error}", request.id);
+            continue;
+        }
+        if queue.remove(request.id).is_none() {
+            continue;
+        }
+        if let Err(error) = daemon::emit_notification_closed(
+            interface.signal_emitter(),
+            request.id,
+            CloseReason::DismissedByUser,
+        )
+        .await
         {
             eprintln!("nobody: falha ao sinalizar fechamento de {}: {error}", request.id);
         }

@@ -1,5 +1,11 @@
 use std::path::PathBuf;
 
+pub const MAX_STACK_TAG_LEN: usize = 128;
+
+pub fn is_valid_stack_tag(tag: &str) -> bool {
+    !tag.is_empty() && tag.chars().count() <= MAX_STACK_TAG_LEN
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Notice {
     pub id: u32,
@@ -10,9 +16,15 @@ pub struct Notice {
     pub actions: Vec<String>,
     pub expire_ms: i32,
     pub arrived_at_ms: u128,
+    pub stack_tag: Option<String>,
+    pub progress: Option<u8>,
 }
 
 impl Notice {
+    pub fn has_default_action(&self) -> bool {
+        self.actions.as_chunks::<2>().0.iter().any(|pair| pair[0] == "default")
+    }
+
     pub fn is_expired_at(&self, now_ms: u128) -> bool {
         self.expire_ms > 0 && now_ms.saturating_sub(self.arrived_at_ms) >= self.expire_ms as u128
     }
@@ -32,6 +44,8 @@ mod tests {
             actions: vec![],
             expire_ms,
             arrived_at_ms,
+            stack_tag: None,
+            progress: None,
         }
     }
 
@@ -56,5 +70,15 @@ mod tests {
     fn future_arrival_is_not_expired() {
         let n = notice(10, 1_000);
         assert!(!n.is_expired_at(500));
+    }
+
+    #[test]
+    fn stack_tag_validation_counts_unicode_characters_without_trimming() {
+        assert!(!is_valid_stack_tag(""));
+        assert!(is_valid_stack_tag("volume"));
+        assert!(is_valid_stack_tag(" "));
+        assert!(is_valid_stack_tag(&"🦀".repeat(MAX_STACK_TAG_LEN)));
+        assert!(!is_valid_stack_tag(&"🦀".repeat(MAX_STACK_TAG_LEN + 1)));
+        assert!(is_valid_stack_tag(" tag "));
     }
 }

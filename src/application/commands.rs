@@ -12,11 +12,30 @@ pub fn expire(queue: &Queue, now_ms: u128) -> Vec<Notice> {
 }
 
 pub fn request_dismissal(queue: &Queue, id: u32) {
+    if !snapshot(queue).iter().any(|notice| notice.id == id) {
+        return;
+    }
     queue.request_close(id, CloseReason::DismissedByUser);
+}
+
+pub fn request_default_action(queue: &Queue, id: u32) {
+    if !snapshot(queue).iter().any(|notice| notice.id == id && notice.has_default_action()) {
+        return;
+    }
+    queue.request_action(id, "default");
 }
 
 pub fn dismiss_all(queue: &Queue) {
     for notice in snapshot(queue) {
+        request_dismissal(queue, notice.id);
+    }
+}
+
+pub fn dismiss_app(queue: &Queue, app: &str) {
+    if app.trim().is_empty() {
+        return;
+    }
+    for notice in snapshot(queue).into_iter().filter(|notice| notice.app == app) {
         request_dismissal(queue, notice.id);
     }
 }
@@ -33,8 +52,6 @@ pub fn clear_history(queue: &Queue) {
     queue.clear_history();
 }
 
-/// Busca local por aplicativo, título ou corpo, sem distinguir maiúsculas.
-/// Consulta vazia retorna tudo.
 pub fn filter_history(entries: &[HistoryEntry], query: &str) -> Vec<HistoryEntry> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -94,6 +111,8 @@ mod tests {
             actions: vec![],
             expire_ms,
             arrived_at_ms,
+            stack_tag: None,
+            progress: None,
         }
     }
 
@@ -114,11 +133,35 @@ mod tests {
     #[test]
     fn request_dismissal_enqueues_dismissed_by_user() {
         let queue = Queue::new();
-        request_dismissal(&queue, 7);
+        let id = queue.push_with_outcome(0, mk("App", 0, 1)).id;
+        request_dismissal(&queue, id);
         assert_eq!(
             queue.drain_close_requests(),
-            vec![CloseRequest { id: 7, reason: CloseReason::DismissedByUser }]
+            vec![CloseRequest { id, reason: CloseReason::DismissedByUser }]
         );
+    }
+
+    #[test]
+    fn request_dismissal_ignores_missing_ids() {
+        let queue = Queue::new();
+        request_dismissal(&queue, 7);
+        assert!(queue.drain_close_requests().is_empty());
+    }
+
+    #[test]
+    fn request_default_action_requires_an_active_default_pair() {
+        let queue = Queue::new();
+        let mut notice = mk("App", 0, 1);
+        notice.actions = vec!["default".into(), "Abrir".into()];
+        let id = queue.push_with_outcome(0, notice).id;
+        request_default_action(&queue, id);
+        request_default_action(&queue, id);
+        assert_eq!(
+            queue.drain_action_requests(),
+            vec![crate::domain::action::ActionRequest { id, key: "default".into() }]
+        );
+        request_default_action(&queue, id + 1);
+        assert!(queue.drain_action_requests().is_empty());
     }
 
     #[test]
@@ -144,6 +187,39 @@ mod tests {
         let empty = Queue::new();
         dismiss_all(&empty);
         assert!(empty.drain_close_requests().is_empty());
+    }
+
+    #[test]
+    fn dismiss_app_matches_snapshot_exactly_and_preserves_history() {
+        let queue = Queue::new();
+        queue.push_with_outcome(0, mk("Spotify", 0, 1));
+        queue.push_with_outcome(0, mk("Spotify", 0, 2));
+        queue.push_with_outcome(0, mk("Spotifyd", 0, 3));
+        queue.push_with_outcome(0, mk("spotify", 0, 4));
+        let history_before = history(&queue);
+        let spotify_ids = snapshot(&queue)
+            .into_iter()
+            .filter(|notice| notice.app == "Spotify")
+            .map(|notice| notice.id)
+            .collect::<Vec<_>>();
+
+        dismiss_app(&queue, " Spotify ");
+        assert!(queue.drain_close_requests().is_empty());
+
+        dismiss_app(&queue, "Spotify");
+        let later_id = queue.push_with_outcome(0, mk("Spotify", 0, 5)).id;
+        let requests = queue.drain_close_requests();
+        assert_eq!(
+            requests,
+            spotify_ids
+                .into_iter()
+                .map(|id| CloseRequest { id, reason: CloseReason::DismissedByUser })
+                .collect::<Vec<_>>()
+        );
+        assert!(!requests.iter().any(|request| request.id == later_id));
+        let history_after = history(&queue);
+        assert_eq!(history_after.len(), history_before.len() + 1);
+        assert_eq!(&history_after[1..], history_before.as_slice());
     }
 
     #[test]
@@ -192,6 +268,8 @@ mod tests {
                 actions: vec![],
                 expire_ms: 0,
                 arrived_at_ms: 0,
+                stack_tag: None,
+                progress: None,
             },
         }
     }
