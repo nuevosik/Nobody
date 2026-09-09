@@ -18,11 +18,12 @@ pub fn request_dismissal(queue: &Queue, id: u32) {
     queue.request_close(id, CloseReason::DismissedByUser);
 }
 
+pub fn request_action(queue: &Queue, id: u32, key: &str) {
+    queue.request_action(id, key);
+}
+
 pub fn request_default_action(queue: &Queue, id: u32) {
-    if !snapshot(queue).iter().any(|notice| notice.id == id && notice.has_default_action()) {
-        return;
-    }
-    queue.request_action(id, "default");
+    request_action(queue, id, "default");
 }
 
 pub fn dismiss_all(queue: &Queue) {

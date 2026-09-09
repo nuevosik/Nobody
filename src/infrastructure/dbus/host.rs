@@ -93,13 +93,12 @@ pub async fn flush_lifecycle_events(connection: &zbus::Connection) {
         if queue.has_pending_close(request.id) {
             continue;
         }
-        let active_default = queue.snapshot().into_iter().find(|notice| {
+        let active_action = queue.snapshot().into_iter().find(|notice| {
             notice.id == request.id
-                && request.key == "default"
-                && notice.has_default_action()
+                && notice.has_action(&request.key)
                 && !notice.is_expired_at(clock::now_ms())
         });
-        if active_default.is_none() {
+        if active_action.is_none() {
             continue;
         }
         if let Err(error) =

@@ -23,7 +23,7 @@ fn caps_include_supported_stack_tag_extensions() {
     assert!(caps.contains(&"x-dunst-stack-tag".to_string()));
     assert!(caps.contains(&"x-canonical-private-synchronous".to_string()));
     assert!(caps.contains(&"value".to_string()));
-    assert!(!caps.contains(&"actions".to_string()));
+    assert!(caps.contains(&"actions".to_string()));
     assert!(!caps.contains(&"body-markup".to_string()));
 }
 

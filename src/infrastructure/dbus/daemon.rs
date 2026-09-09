@@ -109,6 +109,7 @@ impl NotificationDaemon {
     pub fn get_capabilities(&self) -> Vec<String> {
         vec![
             "body".into(),
+            "actions".into(),
             "icon-static".into(),
             "x-dunst-stack-tag".into(),
             "x-canonical-private-synchronous".into(),
@@ -174,7 +175,7 @@ mod tests {
         assert!(caps.contains(&"x-dunst-stack-tag".to_string()));
         assert!(caps.contains(&"x-canonical-private-synchronous".to_string()));
         assert!(caps.contains(&"value".to_string()));
-        assert!(!caps.contains(&"actions".to_string()));
+        assert!(caps.contains(&"actions".to_string()));
         assert!(!caps.contains(&"body-markup".to_string()));
     }
 
@@ -183,11 +184,11 @@ mod tests {
         let daemon = NotificationDaemon { queue: Queue::new(), config: Config::default() };
         let caps = daemon.get_capabilities();
         assert!(caps.contains(&"body".to_string()));
+        assert!(caps.contains(&"actions".to_string()));
         assert!(caps.contains(&"icon-static".to_string()));
         assert!(caps.contains(&"x-dunst-stack-tag".to_string()));
         assert!(caps.contains(&"x-canonical-private-synchronous".to_string()));
         assert!(caps.contains(&"value".to_string()));
         assert!(!caps.contains(&"body-markup".to_string()));
-        assert!(!caps.contains(&"actions".to_string()));
     }
 }

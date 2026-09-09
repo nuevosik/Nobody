@@ -490,6 +490,9 @@ fn default_action_emits_once_before_close_and_keeps_history() {
             ),
         )
         .expect("Notify");
+    let caps: Vec<String> = notifications.call("GetCapabilities", &()).unwrap();
+    assert!(caps.iter().any(|c| c == "body"));
+    assert!(caps.iter().any(|c| c == "actions"));
     let (events, ready, listener) = lifecycle_events(&client, id);
     ready.recv_timeout(Duration::from_secs(1)).expect("signal listener startup");
 
@@ -512,17 +515,66 @@ fn default_action_emits_once_before_close_and_keeps_history() {
 }
 
 #[test]
-fn default_actions_skip_removed_expired_replaced_and_dismissed_notices() {
+fn named_action_emits_once_and_rejects_unknown_keys() {
+    let bus = IsolatedBus::start();
+    let queue = Queue::new();
+    let server = server(&bus, queue.clone());
+    let client = client(&bus);
+    let notifications = zbus::blocking::Proxy::new(
+        &client,
+        SERVICE,
+        NOTIFICATION_PATH,
+        "org.freedesktop.Notifications",
+    )
+    .expect("notification proxy");
+    let id: u32 = notifications
+        .call(
+            "Notify",
+            &(
+                "Brave",
+                0_u32,
+                "",
+                "Video publicado",
+                "youtube.com",
+                vec!["settings".to_string(), "Configurar".to_string()],
+                HashMap::<String, OwnedValue>::new(),
+                0_i32,
+            ),
+        )
+        .expect("Notify with named action");
+    commands::request_action(&queue, id, "unknown");
+    assert!(queue.drain_action_requests().is_empty());
+    let (events, ready, listener) = lifecycle_events(&client, id);
+    ready.recv_timeout(Duration::from_secs(1)).unwrap();
+    commands::request_action(&queue, id, "settings");
+    commands::request_action(&queue, id, "settings");
+    zbus::block_on(host::flush_lifecycle_events(&server));
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(1)).unwrap(),
+        vec![
+            LifecycleEvent::Action(id, "settings".into()),
+            LifecycleEvent::Closed(id, CloseReason::DismissedByUser.code()),
+        ]
+    );
+    listener.join().unwrap();
+    assert!(queue.snapshot().is_empty());
+    assert_eq!(queue.history_snapshot().len(), 1);
+}
+
+#[test]
+fn actions_skip_removed_expired_replaced_and_dismissed_notices() {
     let bus = IsolatedBus::start();
     let queue = Queue::new();
     let server = server(&bus, queue.clone());
     let client = client(&bus);
     let mut actionable = notice("App");
-    actionable.actions = vec!["default".into(), "Abrir".into()];
+    actionable.actions =
+        vec!["default".into(), "Abrir".into(), "settings".into(), "Configurar".into()];
     let ids: Vec<_> = (0..4)
         .map(|_| {
             let id = queue.push_with_outcome(0, actionable.clone()).id;
             commands::request_default_action(&queue, id);
+            commands::request_action(&queue, id, "settings");
             id
         })
         .collect();

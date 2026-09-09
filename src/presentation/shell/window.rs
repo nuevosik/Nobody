@@ -44,7 +44,6 @@ pub struct NotificationStack {
     target_y: HashMap<u32, f32>,
     shown_at: HashMap<u32, u128>,
     last_window_h: Option<f32>,
-    last_input_len: usize,
     fullscreen_hidden: bool,
 }
 
@@ -88,17 +87,12 @@ impl NotificationStack {
             target_y: HashMap::new(),
             shown_at: HashMap::new(),
             last_window_h: None,
-            last_input_len: usize::MAX,
             fullscreen_hidden: false,
         }
     }
 
     fn dismiss(&self, id: u32) {
         commands::request_dismissal(&self.queue, id);
-    }
-
-    fn default_action(&self, id: u32) {
-        commands::request_default_action(&self.queue, id);
     }
 
     fn close_center(&self) {
@@ -110,7 +104,7 @@ impl NotificationStack {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let w = POPUP_W + MARGIN * 2.;
+        let w = POPUP_W + MARGIN * 2. + CARD_R;
         if !self.center_focus_armed {
             self.center_focus_armed = true;
             window.focus(&self.search_focus, cx);
@@ -122,7 +116,6 @@ impl NotificationStack {
                 size: size(px(w), px(PANEL_H)),
             }]));
             self.last_window_h = Some(PANEL_H);
-            self.last_input_len = usize::MAX;
         }
 
         let entries = commands::history(&self.queue);
@@ -139,11 +132,38 @@ impl NotificationStack {
             .size_full()
             .font_family(FONT)
             .text_size(px(11.))
-            .bg(fade(INK, 0.92))
-            .rounded(px(CARD_R))
-            .border_1()
-            .border_color(gpui::Rgba { r: 1., g: 1., b: 1., a: 0.1 })
+            .relative()
             .p(px(MARGIN))
+            .pl(px(MARGIN + CARD_R))
+            .child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    |bounds, _, window, _| {
+                        let origin = bounds.origin;
+                        let w = bounds.size.width;
+                        let h = bounds.size.height;
+                        let r = px(CARD_R);
+                        let mut path = gpui::PathBuilder::fill();
+                        path.move_to(origin);
+                        path.line_to(origin + point(w, px(0.)));
+                        path.line_to(origin + point(w, h));
+                        path.line_to(origin + point(r * 2., h));
+                        path.curve_to(origin + point(r, h - r), origin + point(r, h));
+                        path.line_to(origin + point(r, r));
+                        // Concave corner joins the panel to the bar above it.
+                        path.curve_to(origin, origin + point(r, px(0.)));
+                        path.close();
+                        window.paint_path(
+                            path.build().expect("valid panel outline"),
+                            fade(INK, 0.92),
+                        );
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
             .flex()
             .flex_col()
             .gap(px(8.))
@@ -648,10 +668,9 @@ fn spawn_anim_ticker(cx: &mut Context<NotificationStack>) {
         loop {
             let Ok(needs_anim) = this.update(cx, |stack, _| {
                 let entering = stack
-                    .stack
-                    .notices
-                    .iter()
-                    .any(|n| clock::elapsed_ms(n.arrived_at_ms) < anim::ENTER_MS);
+                    .shown_at
+                    .values()
+                    .any(|&shown_at| clock::elapsed_ms(shown_at) < anim::ENTER_MS);
                 let exiting = !stack.exiting.is_empty();
                 let settling = stack
                     .target_y
@@ -729,7 +748,6 @@ impl gpui::Render for NotificationStack {
         if self.fullscreen_hidden {
             self.fullscreen_hidden = false;
             self.last_window_h = None;
-            self.last_input_len = usize::MAX;
         }
         if self.center_open {
             return self.render_center(window, cx).into_any_element();
@@ -738,7 +756,6 @@ impl gpui::Render for NotificationStack {
             geometry::sync_window_geometry(
                 window,
                 &mut self.last_window_h,
-                &mut self.last_input_len,
                 &[],
                 MARGIN + QUIET_BADGE + MARGIN,
             );
@@ -805,23 +822,16 @@ impl gpui::Render for NotificationStack {
         } else {
             total_h_current.max(exiting_max_y + CARD_GAP)
         };
-        let cards_y: Vec<f32> = shown
+        let positions: Vec<f32> = self
+            .stack
+            .notices
             .iter()
-            .flat_map(|s| {
-                s.indices.iter().map(|&i| {
-                    let id = self.stack.notices[i].id;
-                    self.smooth_y.get(&id).copied().unwrap_or(y_map[i])
-                })
-            })
+            .enumerate()
+            .map(|(i, notice)| self.smooth_y.get(&notice.id).copied().unwrap_or(y_map[i]))
             .collect();
+        let input_regions = geometry::deck_input_regions(&deck_list, &shown, &positions);
 
-        geometry::sync_window_geometry(
-            window,
-            &mut self.last_window_h,
-            &mut self.last_input_len,
-            &cards_y,
-            total_h,
-        );
+        geometry::sync_window_geometry(window, &mut self.last_window_h, &input_regions, total_h);
 
         if !shown.is_empty() && !self.popup_focus.contains_focused(window, cx) {
             // Recover focus after a focused card disappears or the central closes.
@@ -873,26 +883,23 @@ impl gpui::Render for NotificationStack {
             )
             .children({
                 let mut slot_of: Vec<usize> = vec![0; shown.len()];
+                let mut tab_of = vec![0; self.stack.notices.len()];
                 {
                     let mut slot = 0;
+                    let mut tab = 0;
                     for (k, s) in shown.iter().enumerate() {
                         slot_of[k] = slot;
                         slot += s.indices.len();
+                        for &idx in &s.indices {
+                            tab_of[idx] = tab;
+                            tab += 1 + self.stack.notices[idx].actions.len() / 2;
+                        }
                     }
                 }
                 let mut els: Vec<gpui::Stateful<gpui::Div>> = Vec::new();
                 for (k, s) in shown.iter().enumerate().rev() {
                     let deck = &deck_list[s.deck];
-                    let smooth_at = |idx: usize| {
-                        let id = self.stack.notices[idx].id;
-                        self.smooth_y.get(&id).copied().unwrap_or(y_map[idx])
-                    };
-                    let first_y = smooth_at(s.indices[0]);
-                    let last_y = smooth_at(*s.indices.last().expect("deck mostrado não é vazio"));
-                    let mut footprint = last_y - first_y + CARD_H;
-                    if deck.collapsed {
-                        footprint += geometry::STACK_PEEK;
-                    }
+                    let first_y = f32::from(input_regions[k].origin.y);
                     let expand_app = deck.app.clone();
                     let mut container = div()
                         .id(format!("deck-{}", deck.app))
@@ -900,7 +907,7 @@ impl gpui::Render for NotificationStack {
                         .top(px(first_y))
                         .right(px(MARGIN))
                         .w(px(POPUP_W))
-                        .h(px(footprint))
+                        .h(input_regions[k].size.height)
                         .on_hover(cx.listener(move |stack, hovered: &bool, _, cx| {
                             let next =
                                 hover_expand(stack.expanded.as_deref(), &expand_app, *hovered);
@@ -911,7 +918,7 @@ impl gpui::Render for NotificationStack {
                         }));
                     for (m, &idx) in s.indices.iter().enumerate() {
                         let slot = slot_of[k] + m;
-                        let y = smooth_at(idx) - first_y;
+                        let y = positions[idx] - first_y;
                         let notice = &self.stack.notices[idx];
                         let hidden = if deck.collapsed && m == 0 { deck.hidden_count() } else { 0 };
                         let shown_since =
@@ -928,6 +935,21 @@ impl gpui::Render for NotificationStack {
                             if slot == 0 { 1. } else { (1. - slot as f32 * 0.14).clamp(0.55, 1.) };
                         let opacity = t * base_opacity;
                         let notice_id = notice.id;
+                        let card_focus = window
+                            .use_keyed_state(("card-focus", notice_id), cx, |_, cx| {
+                                cx.focus_handle().tab_stop(true)
+                            })
+                            .read(cx)
+                            .clone();
+                        if deck.collapsed && m == 0 && card_focus.is_focused(window) {
+                            // Teclado não tem hover: focar o card visível expande o
+                            // deck para que Tab alcance os irmãos ocultos.
+                            // ponytail: sem auto-recolher no blur para não roubar foco.
+                            if self.expanded.as_deref() != Some(deck.app.as_str()) {
+                                self.expanded = Some(deck.app.clone());
+                                cx.notify();
+                            }
+                        }
                         let mut card = div()
                             .id(("notif", notice_id))
                             .absolute()
@@ -943,7 +965,7 @@ impl gpui::Render for NotificationStack {
                             .overflow_hidden()
                             .opacity(opacity)
                             .cursor_pointer()
-                            .tab_index((slot * 2) as isize)
+                            .track_focus(&card_focus.tab_index(tab_of[idx] as isize))
                             .role(gpui::accesskit::Role::Button)
                             .aria_label(popup::a11y_label(notice))
                             .aria_keyshortcuts("Enter Space Escape")
@@ -974,43 +996,102 @@ impl gpui::Render for NotificationStack {
                             .px(px(10.))
                             .child(popup::badge(notice.icon.as_ref(), &notice.app))
                             .child(popup::card_content(notice));
-                        if notice.has_default_action() {
+                        let pairs = notice.actions.as_chunks::<2>().0;
+                        if !pairs.is_empty() {
                             let action_id = notice_id;
+                            let base_tab = tab_of[idx];
+                            let scroll = window
+                                .use_keyed_state(("action-scroll", action_id), cx, |_, _| {
+                                    gpui::ScrollHandle::new()
+                                })
+                                .read(cx)
+                                .clone();
                             card = card.child(
                                 div()
-                                    .id(("default-action", action_id))
-                                    .tab_index((slot * 2 + 1) as isize)
-                                    .role(Role::Button)
-                                    .aria_label("Abrir")
-                                    .aria_keyshortcuts("Enter Space")
-                                    .cursor_pointer()
-                                    .px(px(8.))
-                                    .py(px(4.))
-                                    .rounded(px(6.))
-                                    .bg(fade(CHIP, 1.))
-                                    .text_color(fade(TEXT, 0.95))
-                                    .focus_visible(|s| s.border_2().border_color(fade(ACCENT, 1.)))
-                                    .child("Abrir")
-                                    .on_click(cx.listener(move |stack, _, _, cx| {
-                                        cx.stop_propagation();
-                                        stack.default_action(action_id);
-                                        cx.notify();
-                                    }))
-                                    .on_key_down(cx.listener(
-                                        move |stack, event: &gpui::KeyDownEvent, _, cx| {
-                                            if event.keystroke.modifiers.modified() {
-                                                return;
-                                            }
-                                            if matches!(
-                                                event.keystroke.key.as_str(),
-                                                "enter" | "space"
-                                            ) {
+                                    .id(format!("actions-{action_id}"))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .max_w(px(150.))
+                                    .flex_shrink_0()
+                                    .overflow_x_scroll()
+                                    .track_scroll(&scroll)
+                                    .children(pairs.iter().enumerate().map(|(i, pair)| {
+                                        let key = pair[0].clone();
+                                        let label = if key == "default" {
+                                            "Abrir"
+                                        } else if pair[1].is_empty() {
+                                            "Ação"
+                                        } else {
+                                            &pair[1]
+                                        }
+                                        .to_string();
+                                        let (focus, just_focused) = window
+                                            .use_keyed_state(
+                                                format!("action-focus-{action_id}-{key}"),
+                                                cx,
+                                                |_, cx| (cx.focus_handle().tab_stop(true), false),
+                                            )
+                                            .update(cx, |(focus, was_focused), _| {
+                                                let focused = focus.is_focused(window);
+                                                let just_focused = focused && !*was_focused;
+                                                *was_focused = focused;
+                                                (focus.clone(), just_focused)
+                                            });
+                                        if just_focused {
+                                            scroll.scroll_to_item(i);
+                                        }
+                                        let key_click = key.clone();
+                                        div()
+                                            .id(format!("action-{action_id}-{key}"))
+                                            .track_focus(
+                                                &focus.tab_index((base_tab + 1 + i) as isize),
+                                            )
+                                            .role(Role::Button)
+                                            .aria_label(label.clone())
+                                            .aria_keyshortcuts("Enter Space")
+                                            .cursor_pointer()
+                                            .px(px(8.))
+                                            .py(px(4.))
+                                            .rounded(px(6.))
+                                            .bg(fade(CHIP, 1.))
+                                            .text_color(fade(TEXT, 0.95))
+                                            .flex_shrink_0()
+                                            .max_w(px(150.))
+                                            .truncate()
+                                            .focus_visible(|s| {
+                                                s.border_2().border_color(fade(ACCENT, 1.))
+                                            })
+                                            .child(label)
+                                            .on_click(cx.listener(move |stack, _, _, cx| {
                                                 cx.stop_propagation();
-                                                stack.default_action(action_id);
+                                                commands::request_action(
+                                                    &stack.queue,
+                                                    action_id,
+                                                    &key_click,
+                                                );
                                                 cx.notify();
-                                            }
-                                        },
-                                    )),
+                                            }))
+                                            .on_key_down(cx.listener(
+                                                move |stack, event: &gpui::KeyDownEvent, _, cx| {
+                                                    if event.keystroke.modifiers.modified() {
+                                                        return;
+                                                    }
+                                                    if matches!(
+                                                        event.keystroke.key.as_str(),
+                                                        "enter" | "space"
+                                                    ) {
+                                                        cx.stop_propagation();
+                                                        commands::request_action(
+                                                            &stack.queue,
+                                                            action_id,
+                                                            &key,
+                                                        );
+                                                        cx.notify();
+                                                    }
+                                                },
+                                            ))
+                                    })),
                             );
                         }
                         if hidden > 0 {

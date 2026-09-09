@@ -152,14 +152,32 @@ pub fn shown_decks(decks: &[Deck], max_slots: usize) -> Vec<ShownDeck> {
     out
 }
 
+pub(crate) fn deck_input_regions(
+    decks: &[Deck],
+    shown: &[ShownDeck],
+    positions: &[f32],
+) -> Vec<Bounds<gpui::Pixels>> {
+    shown
+        .iter()
+        .map(|s| {
+            let top = s.indices.iter().map(|&i| positions[i]).fold(f32::INFINITY, f32::min);
+            let bottom = s.indices.iter().map(|&i| positions[i]).fold(f32::NEG_INFINITY, f32::max)
+                + CARD_H
+                + if decks[s.deck].collapsed { STACK_PEEK } else { 0. };
+            Bounds {
+                origin: point(px(0.), px(top)),
+                size: size(px(POPUP_W + MARGIN * 2.), px(bottom - top)),
+            }
+        })
+        .collect()
+}
+
 pub fn sync_window_geometry(
     window: &mut Window,
     last_h: &mut Option<f32>,
-    last_n: &mut usize,
-    cards_y: &[f32],
+    input_regions: &[Bounds<gpui::Pixels>],
     total_h: f32,
 ) {
-    let n = cards_y.len();
     let should_resize = last_h.is_none_or(|h| (h - total_h).abs() > 0.5);
     if should_resize {
         let h = if total_h > 0. { total_h } else { 1. };
@@ -167,18 +185,8 @@ pub fn sync_window_geometry(
         *last_h = Some(total_h);
     }
 
-    let should_recalc_input = *last_n != n || should_resize;
-    if should_recalc_input {
-        let cards: Vec<Bounds<gpui::Pixels>> = cards_y
-            .iter()
-            .map(|&y| Bounds {
-                origin: point(px(0.), px(y)),
-                size: size(px(POPUP_W + MARGIN * 2.), px(CARD_H)),
-            })
-            .collect();
-        window.set_input_region(Some(&cards));
-        *last_n = n;
-    }
+    // Positions can change without the window height or number of decks changing.
+    window.set_input_region(Some(input_regions));
 }
 
 #[cfg(test)]
@@ -198,6 +206,31 @@ mod tests {
             stack_tag: None,
             progress: None,
         }
+    }
+
+    #[test]
+    fn deck_input_has_no_holes_between_siblings_but_keeps_other_apps_separate() {
+        let notices = vec![mk(1, "A"), mk(2, "A"), mk(3, "B")];
+        let decks = decks(&notices, Some("A"));
+        let shown = shown_decks(&decks, 5);
+        let (positions, _, _) = deck_layout(&notices, &decks, &shown);
+        let regions = deck_input_regions(&decks, &shown, &positions);
+        let receives_mouse = |y| regions.iter().any(|r| r.contains(&point(px(MARGIN), px(y))));
+        for y in positions[0] as u32..(positions[1] + CARD_H) as u32 {
+            assert!(receives_mouse(y as f32), "mouse leaves the deck at y={y}");
+        }
+        assert!(!receives_mouse(positions[1] + CARD_H + CARD_GAP / 2.));
+        assert!(receives_mouse(positions[2]));
+    }
+
+    #[test]
+    fn collapsed_deck_input_includes_the_ghost_cards() {
+        let notices = vec![mk(1, "A"), mk(2, "A")];
+        let decks = decks(&notices, None);
+        let shown = shown_decks(&decks, 5);
+        let (positions, _, _) = deck_layout(&notices, &decks, &shown);
+        let regions = deck_input_regions(&decks, &shown, &positions);
+        assert!(regions[0].contains(&point(px(MARGIN), px(STACK_TOP + CARD_H + STACK_PEEK / 2.))));
     }
 
     #[test]

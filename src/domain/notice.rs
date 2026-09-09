@@ -21,8 +21,12 @@ pub struct Notice {
 }
 
 impl Notice {
+    pub fn has_action(&self, key: &str) -> bool {
+        self.actions.as_chunks::<2>().0.iter().any(|pair| pair[0] == key)
+    }
+
     pub fn has_default_action(&self) -> bool {
-        self.actions.as_chunks::<2>().0.iter().any(|pair| pair[0] == "default")
+        self.has_action("default")
     }
 
     pub fn is_expired_at(&self, now_ms: u128) -> bool {
@@ -70,6 +74,22 @@ mod tests {
     fn future_arrival_is_not_expired() {
         let n = notice(10, 1_000);
         assert!(!n.is_expired_at(500));
+    }
+
+    #[test]
+    fn action_keys_require_a_complete_pair() {
+        let mut n = notice(0, 0);
+        n.actions = vec![
+            "default".into(),
+            "Abrir".into(),
+            "settings".into(),
+            "Configurar".into(),
+            "orphan".into(),
+        ];
+        assert!(n.has_default_action());
+        assert!(n.has_action("settings"));
+        assert!(!n.has_action("orphan"));
+        assert!(!n.has_action("missing"));
     }
 
     #[test]

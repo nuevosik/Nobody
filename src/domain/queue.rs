@@ -202,10 +202,7 @@ impl Queue {
         if id == 0 || key.is_empty() {
             return;
         }
-        if !self
-            .snapshot()
-            .iter()
-            .any(|notice| notice.id == id && (key != "default" || notice.has_default_action()))
+        if !self.snapshot().iter().any(|notice| notice.id == id && notice.has_action(key))
             || self.has_pending_close(id)
         {
             return;
