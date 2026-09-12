@@ -66,6 +66,7 @@ mod tests {
         Notice {
             id,
             app: app.into(),
+            desktop_entry: None,
             summary: "s".into(),
             body: "".into(),
             icon: None,

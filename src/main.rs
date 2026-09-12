@@ -66,18 +66,44 @@ fn run_control(cli: Cli) -> i32 {
     }
 }
 
-fn run_daemon() {
-    application().run(|cx: &mut App| {
-        let queue = Queue::new();
-        let runtime_config = config::load();
+fn run_daemon() -> zbus::Result<()> {
+    let queue = Queue::new();
+    let runtime_config = config::load();
+    let initial_connection = zbus::block_on(host::serve(queue.clone(), runtime_config))?;
 
+    application().run(move |cx: &mut App| {
         let host_queue = queue.clone();
         let host_config = runtime_config;
         cx.spawn(async move |cx: &mut AsyncApp| {
-            let Some(conn) = host::serve(host_queue.clone(), host_config).await else {
-                return;
-            };
+            let mut conn = initial_connection;
             loop {
+                if conn.is_closed() {
+                    eprintln!("nobody: conexão com o session bus perdida; tentando reconectar");
+                    loop {
+                        match host::serve(host_queue.clone(), host_config).await {
+                            Ok(reconnected) => {
+                                conn = reconnected;
+                                eprintln!("nobody: conexão com o session bus restabelecida");
+                                break;
+                            }
+                            Err(error) if host::is_retryable(&error) => {
+                                eprintln!("nobody: reconexão D-Bus falhou: {error}");
+                                cx.background_executor().timer(Duration::from_secs(1)).await;
+                            }
+                            Err(zbus::Error::NameTaken) => {
+                                eprintln!(
+                                    "nobody: outro daemon ocupa {}",
+                                    host::NOTIFICATION_SERVICE
+                                );
+                                std::process::exit(1);
+                            }
+                            Err(error) => {
+                                eprintln!("nobody: reconexão D-Bus encerrada: {error}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
                 host::flush_lifecycle_events(&conn).await;
                 cx.background_executor().timer(Duration::from_millis(100)).await;
             }
@@ -99,12 +125,27 @@ fn run_daemon() {
             std::process::exit(1);
         }
     });
+    Ok(())
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match cli::parse(&args) {
-        Cli::Daemon => run_daemon(),
+        Cli::Daemon => {
+            if let Err(error) = run_daemon() {
+                if matches!(error, zbus::Error::NameTaken) {
+                    eprintln!(
+                        "nobody: outro daemon ocupa {}. Pare o daemon atual antes de iniciar outro",
+                        host::NOTIFICATION_SERVICE
+                    );
+                } else {
+                    eprintln!(
+                        "nobody: falha ao iniciar serviço no session bus ({error}). Verifique DBUS_SESSION_BUS_ADDRESS"
+                    );
+                }
+                std::process::exit(1);
+            }
+        }
         cli => std::process::exit(run_control(cli)),
     }
 }

@@ -233,6 +233,7 @@ mod tests {
                 Notice {
                     id: 0,
                     app: "Spotify".into(),
+                    desktop_entry: None,
                     summary: "sum".into(),
                     body: String::new(),
                     icon: None,
@@ -250,13 +251,11 @@ mod tests {
         assert!(matches!(svc.dismiss_app("   "), Err(fdo::Error::InvalidArgs(_))));
         svc.dismiss(id).unwrap();
         svc.dismiss_app("Spotify").unwrap();
-        assert_eq!(
-            queue.drain_close_requests(),
-            vec![crate::domain::close::CloseRequest {
-                id,
-                reason: crate::domain::close::CloseReason::DismissedByUser,
-            }]
-        );
+        let requests = queue.drain_close_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, id);
+        assert!(requests[0].revision > 0);
+        assert_eq!(requests[0].reason, crate::domain::close::CloseReason::DismissedByUser);
     }
 
     #[test]
@@ -267,6 +266,7 @@ mod tests {
             crate::domain::notice::Notice {
                 id: 0,
                 app: "App".into(),
+                desktop_entry: None,
                 summary: "sum".into(),
                 body: "body".into(),
                 icon: None,
@@ -350,6 +350,7 @@ mod tests {
             Notice {
                 id: 0,
                 app: "App \"Quoted\" & /slash/ \\backslash\\".into(),
+                desktop_entry: None,
                 summary: "Line 1\nLine 2".into(),
                 body: "Unicode café ☕ 🎉".into(),
                 icon: None,
@@ -395,6 +396,7 @@ mod tests {
             Notice {
                 id: 0,
                 app: "First".into(),
+                desktop_entry: None,
                 summary: "s1".into(),
                 body: "b1".into(),
                 icon: None,
@@ -410,6 +412,7 @@ mod tests {
             Notice {
                 id: 0,
                 app: "Second".into(),
+                desktop_entry: None,
                 summary: "s2".into(),
                 body: "b2".into(),
                 icon: None,
@@ -453,6 +456,7 @@ mod tests {
             Notice {
                 id: 0,
                 app: "App".into(),
+                desktop_entry: None,
                 summary: "sum".into(),
                 body: "body".into(),
                 icon: None,

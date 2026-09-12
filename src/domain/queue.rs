@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +20,8 @@ pub struct Queue {
     quiet: Arc<AtomicBool>,
     history: Arc<Mutex<VecDeque<HistoryEntry>>>,
     next_seq: Arc<AtomicU64>,
+    revisions: Arc<Mutex<HashMap<u32, u64>>>,
+    next_revision: Arc<AtomicU64>,
     manual_quiet: Arc<AtomicBool>,
     center_open: Arc<AtomicBool>,
 }
@@ -39,6 +42,8 @@ impl Queue {
             quiet: Arc::new(AtomicBool::new(false)),
             history: Arc::new(Mutex::new(VecDeque::new())),
             next_seq: Arc::new(AtomicU64::new(1)),
+            revisions: Arc::new(Mutex::new(HashMap::new())),
+            next_revision: Arc::new(AtomicU64::new(1)),
             manual_quiet: Arc::new(AtomicBool::new(false)),
             center_open: Arc::new(AtomicBool::new(false)),
         }
@@ -112,7 +117,15 @@ impl Queue {
         }
     }
 
-    pub fn push_with_outcome(&self, replaces: u32, mut notice: Notice) -> PushOutcome {
+    pub fn push_with_outcome(&self, replaces: u32, notice: Notice) -> PushOutcome {
+        self.push_with_revision(replaces, notice).0
+    }
+
+    pub(crate) fn push_with_revision(
+        &self,
+        replaces: u32,
+        mut notice: Notice,
+    ) -> (PushOutcome, u64) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         if replaces != 0 {
@@ -121,8 +134,9 @@ impl Queue {
                 inner.remove(pos);
                 notice.id = replaces;
                 inner.push_front(notice.clone());
+                let revision = self.start_revision(replaces);
                 self.record_history(replaces, notice);
-                return PushOutcome { id: replaces, evicted: Vec::new() };
+                return (PushOutcome { id: replaces, evicted: Vec::new() }, revision);
             }
             reserve_id(&self.next_id, replaces);
         } else if let Some(tag) = notice.stack_tag.as_deref()
@@ -135,27 +149,102 @@ impl Queue {
             inner.remove(pos);
             notice.id = id;
             inner.push_front(notice.clone());
+            let revision = self.start_revision(id);
             self.record_history(id, notice);
-            return PushOutcome { id, evicted: Vec::new() };
+            return (PushOutcome { id, evicted: Vec::new() }, revision);
         }
 
         let id = next_available_id(&self.next_id, &inner);
         notice.id = id;
         inner.push_front(notice.clone());
+        let revision = self.start_revision(id);
         let mut evicted = Vec::new();
         while inner.len() > KEEP {
             if let Some(notice) = inner.pop_back() {
                 evicted.push(notice);
             }
         }
+        if !evicted.is_empty() {
+            let mut revisions = self.revisions.lock().unwrap_or_else(|e| e.into_inner());
+            for notice in &evicted {
+                revisions.remove(&notice.id);
+            }
+        }
         self.record_history(0, notice);
-        PushOutcome { id, evicted }
+        (PushOutcome { id, evicted }, revision)
+    }
+
+    fn start_revision(&self, id: u32) -> u64 {
+        let revision = self.next_revision.fetch_add(1, Ordering::Relaxed);
+        self.revisions.lock().unwrap_or_else(|e| e.into_inner()).insert(id, revision);
+        revision
+    }
+
+    pub(crate) fn is_current_revision(&self, id: u32, revision: u64) -> bool {
+        self.revisions.lock().unwrap_or_else(|e| e.into_inner()).get(&id) == Some(&revision)
+    }
+
+    pub(crate) fn action_target_if_current(
+        &self,
+        id: u32,
+        revision: u64,
+        key: &str,
+        now_ms: u128,
+    ) -> Option<(Option<String>, String)> {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let revisions = self.revisions.lock().unwrap_or_else(|e| e.into_inner());
+        (revisions.get(&id) == Some(&revision))
+            .then(|| {
+                inner.iter().find(|notice| {
+                    notice.id == id && notice.has_action(key) && !notice.is_expired_at(now_ms)
+                })
+            })
+            .flatten()
+            .map(|notice| (notice.desktop_entry.clone(), notice.app.clone()))
+    }
+
+    pub(crate) fn set_icon_if_current(&self, id: u32, revision: u64, icon: PathBuf) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let revisions = self.revisions.lock().unwrap_or_else(|e| e.into_inner());
+        if revisions.get(&id) != Some(&revision) {
+            return false;
+        }
+        let Some(notice) = inner.iter_mut().find(|notice| notice.id == id) else {
+            return false;
+        };
+        notice.icon = Some(icon.clone());
+        drop(revisions);
+
+        if let Some(entry) = self
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter_mut()
+            .find(|entry| entry.notice.id == id)
+        {
+            entry.notice.icon = Some(icon);
+        }
+        true
     }
 
     pub fn remove(&self, id: u32) -> Option<Notice> {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let idx = inner.iter().position(|n| n.id == id)?;
-        inner.remove(idx)
+        let notice = inner.remove(idx);
+        self.revisions.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        notice
+    }
+
+    pub(crate) fn remove_if_current(&self, id: u32, revision: u64) -> Option<Notice> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut revisions = self.revisions.lock().unwrap_or_else(|e| e.into_inner());
+        if revisions.get(&id) != Some(&revision) {
+            return None;
+        }
+        let index = inner.iter().position(|notice| notice.id == id)?;
+        let notice = inner.remove(index)?;
+        revisions.remove(&id);
+        Some(notice)
     }
 
     pub fn snapshot(&self) -> Vec<Notice> {
@@ -173,6 +262,12 @@ impl Queue {
                 true
             }
         });
+        if !expired.is_empty() {
+            let mut revisions = self.revisions.lock().unwrap_or_else(|e| e.into_inner());
+            for notice in &expired {
+                revisions.remove(&notice.id);
+            }
+        }
         expired
     }
 
@@ -181,8 +276,18 @@ impl Queue {
             return;
         }
 
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let revisions = self.revisions.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(&revision) = revisions.get(&id) else {
+            return;
+        };
+        if !inner.iter().any(|notice| notice.id == id) {
+            return;
+        }
         let mut requests = self.close_requests.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(existing) = requests.iter_mut().find(|r| r.id == id) {
+        if let Some(existing) =
+            requests.iter_mut().find(|request| request.id == id && request.revision == revision)
+        {
             if existing.reason != reason && reason.priority() > existing.reason.priority() {
                 existing.reason = reason;
             }
@@ -191,7 +296,7 @@ impl Queue {
         if requests.len() >= KEEP * 2 {
             requests.pop_front();
         }
-        requests.push_back(CloseRequest { id, reason });
+        requests.push_back(CloseRequest { id, revision, reason });
     }
 
     pub fn drain_close_requests(&self) -> Vec<CloseRequest> {
@@ -202,31 +307,42 @@ impl Queue {
         if id == 0 || key.is_empty() {
             return;
         }
-        if !self.snapshot().iter().any(|notice| notice.id == id && notice.has_action(key))
-            || self.has_pending_close(id)
-        {
+
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let revisions = self.revisions.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(&revision) = revisions.get(&id) else {
+            return;
+        };
+        if !inner.iter().any(|notice| notice.id == id && notice.has_action(key)) {
+            return;
+        }
+        let close_requests = self.close_requests.lock().unwrap_or_else(|e| e.into_inner());
+        if close_requests.iter().any(|request| request.id == id && request.revision == revision) {
             return;
         }
         let mut requests = self.action_requests.lock().unwrap_or_else(|e| e.into_inner());
-        if requests.iter().any(|request| request.id == id && request.key == key) {
+        if requests
+            .iter()
+            .any(|request| request.id == id && request.revision == revision && request.key == key)
+        {
             return;
         }
         if requests.len() >= KEEP * 2 {
             requests.pop_front();
         }
-        requests.push_back(ActionRequest { id, key: key.to_string() });
+        requests.push_back(ActionRequest { id, revision, key: key.to_string() });
     }
 
     pub fn drain_action_requests(&self) -> Vec<ActionRequest> {
         self.action_requests.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect()
     }
 
-    pub fn has_pending_close(&self, id: u32) -> bool {
+    pub fn has_pending_close(&self, id: u32, revision: u64) -> bool {
         self.close_requests
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .any(|request| request.id == id)
+            .any(|request| request.id == id && request.revision == revision)
     }
 
     #[cfg(test)]
@@ -247,6 +363,7 @@ mod tests {
         Notice {
             id,
             app: app.into(),
+            desktop_entry: None,
             summary: "s".into(),
             body: "".into(),
             icon: None,
@@ -291,6 +408,24 @@ mod tests {
         let id2 = push(&q, id, mk(0, "B"));
         assert_eq!(id, id2);
         assert_eq!(q.len(), 1);
+    }
+
+    #[test]
+    fn delayed_icon_only_updates_the_matching_revision() {
+        let q = Queue::new();
+        let (first, first_revision) = q.push_with_revision(0, mk(0, "A"));
+        let (replacement, replacement_revision) = q.push_with_revision(first.id, mk(0, "B"));
+
+        assert!(!q.set_icon_if_current(first.id, first_revision, "old.png".into()));
+        assert!(q.set_icon_if_current(replacement.id, replacement_revision, "new.png".into()));
+        assert_eq!(q.snapshot()[0].icon.as_deref(), Some(std::path::Path::new("new.png")));
+        assert_eq!(
+            q.history_snapshot()[0].notice.icon.as_deref(),
+            Some(std::path::Path::new("new.png"))
+        );
+
+        q.remove(replacement.id);
+        assert!(!q.set_icon_if_current(replacement.id, replacement_revision, "late.png".into()));
     }
 
     #[test]
@@ -404,12 +539,21 @@ mod tests {
     fn action_requests_require_current_default_and_deduplicate_before_flush() {
         let q = Queue::new();
         let mut notice = mk(0, "App");
+        notice.desktop_entry = Some("org.example.App".into());
         notice.actions = vec!["default".into(), "Abrir".into()];
         let id = push(&q, 0, notice);
 
         q.request_action(id, "default");
         q.request_action(id, "default");
-        assert_eq!(q.drain_action_requests(), vec![ActionRequest { id, key: "default".into() }]);
+        let requests = q.drain_action_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, id);
+        assert_eq!(requests[0].revision, 1);
+        assert_eq!(requests[0].key, "default");
+        assert_eq!(
+            q.action_target_if_current(id, requests[0].revision, "default", 0),
+            Some((Some("org.example.App".into()), "App".into()))
+        );
 
         q.request_close(id, CloseReason::DismissedByUser);
         q.request_action(id, "default");
@@ -502,13 +646,15 @@ mod tests {
     #[test]
     fn queues_each_close_request_once() {
         let q = Queue::new();
-        q.request_close(7, CloseReason::DismissedByUser);
-        q.request_close(7, CloseReason::ClosedByCall);
+        let id = push(&q, 0, mk(0, "App"));
+        q.request_close(id, CloseReason::DismissedByUser);
+        q.request_close(id, CloseReason::ClosedByCall);
 
-        assert_eq!(
-            q.drain_close_requests(),
-            vec![CloseRequest { id: 7, reason: CloseReason::DismissedByUser }]
-        );
+        let requests = q.drain_close_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, id);
+        assert_eq!(requests[0].revision, 1);
+        assert_eq!(requests[0].reason, CloseReason::DismissedByUser);
     }
 
     #[test]
@@ -521,78 +667,70 @@ mod tests {
     #[test]
     fn close_request_upgrades_to_more_specific_reason() {
         let q = Queue::new();
-        q.request_close(1, CloseReason::Expired);
-        q.request_close(1, CloseReason::DismissedByUser);
-        assert_eq!(
-            q.drain_close_requests(),
-            vec![CloseRequest { id: 1, reason: CloseReason::DismissedByUser }]
-        );
+        let id = push(&q, 0, mk(0, "App"));
+        q.request_close(id, CloseReason::Expired);
+        q.request_close(id, CloseReason::DismissedByUser);
+        assert_eq!(q.drain_close_requests()[0].reason, CloseReason::DismissedByUser);
 
         let q = Queue::new();
-        q.request_close(2, CloseReason::Undefined);
-        q.request_close(2, CloseReason::ClosedByCall);
-        assert_eq!(
-            q.drain_close_requests(),
-            vec![CloseRequest { id: 2, reason: CloseReason::ClosedByCall }]
-        );
+        let id = push(&q, 0, mk(0, "App"));
+        q.request_close(id, CloseReason::Undefined);
+        q.request_close(id, CloseReason::ClosedByCall);
+        assert_eq!(q.drain_close_requests()[0].reason, CloseReason::ClosedByCall);
     }
 
     #[test]
     fn close_request_never_downgrades_reason() {
         let q = Queue::new();
-        q.request_close(1, CloseReason::DismissedByUser);
-        q.request_close(1, CloseReason::Expired);
-        assert_eq!(
-            q.drain_close_requests(),
-            vec![CloseRequest { id: 1, reason: CloseReason::DismissedByUser }]
-        );
+        let id = push(&q, 0, mk(0, "App"));
+        q.request_close(id, CloseReason::DismissedByUser);
+        q.request_close(id, CloseReason::Expired);
+        assert_eq!(q.drain_close_requests()[0].reason, CloseReason::DismissedByUser);
 
         let q = Queue::new();
-        q.request_close(2, CloseReason::ClosedByCall);
-        q.request_close(2, CloseReason::Undefined);
-        assert_eq!(
-            q.drain_close_requests(),
-            vec![CloseRequest { id: 2, reason: CloseReason::ClosedByCall }]
-        );
+        let id = push(&q, 0, mk(0, "App"));
+        q.request_close(id, CloseReason::ClosedByCall);
+        q.request_close(id, CloseReason::Undefined);
+        assert_eq!(q.drain_close_requests()[0].reason, CloseReason::ClosedByCall);
 
         let q = Queue::new();
-        q.request_close(3, CloseReason::Expired);
-        q.request_close(3, CloseReason::Undefined);
-        assert_eq!(
-            q.drain_close_requests(),
-            vec![CloseRequest { id: 3, reason: CloseReason::Expired }]
-        );
+        let id = push(&q, 0, mk(0, "App"));
+        q.request_close(id, CloseReason::Expired);
+        q.request_close(id, CloseReason::Undefined);
+        assert_eq!(q.drain_close_requests()[0].reason, CloseReason::Expired);
     }
 
     #[test]
     fn close_request_dedupe_does_not_evict_when_full() {
         let q = Queue::new();
-        for id in 1..=(KEEP * 2) as u32 {
-            let reason = if id == 1 { CloseReason::DismissedByUser } else { CloseReason::Expired };
-            q.request_close(id, reason);
-        }
-        q.request_close(12, CloseReason::Expired);
-        q.request_close(1, CloseReason::Expired);
-
-        let mut expected = Vec::new();
-        expected.push(CloseRequest { id: 1, reason: CloseReason::DismissedByUser });
-        for id in 2..=(KEEP * 2) as u32 {
-            expected.push(CloseRequest { id, reason: CloseReason::Expired });
-        }
-        assert_eq!(q.drain_close_requests(), expected);
-
-        let q = Queue::new();
-        for id in 1..=(KEEP * 2) as u32 {
+        let id = push(&q, 0, mk(0, "App"));
+        for revision in 1..=(KEEP * 2) as u64 {
+            if revision > 1 {
+                push(&q, id, mk(0, "App"));
+            }
             q.request_close(id, CloseReason::Expired);
         }
-        q.request_close(999, CloseReason::Expired);
+        q.request_close(id, CloseReason::DismissedByUser);
+        let requests = q.drain_close_requests();
+        assert_eq!(requests.len(), KEEP * 2);
+        assert_eq!(requests.first().unwrap().revision, 1);
+        assert_eq!(requests.last().unwrap().revision, (KEEP * 2) as u64);
+        assert_eq!(requests.last().unwrap().reason, CloseReason::DismissedByUser);
 
-        let mut expected = Vec::new();
-        for id in 2..=(KEEP * 2) as u32 {
-            expected.push(CloseRequest { id, reason: CloseReason::Expired });
+        let q = Queue::new();
+        let id = push(&q, 0, mk(0, "App"));
+        for revision in 1..=(KEEP * 2) as u64 {
+            if revision > 1 {
+                push(&q, id, mk(0, "App"));
+            }
+            q.request_close(id, CloseReason::Expired);
         }
-        expected.push(CloseRequest { id: 999, reason: CloseReason::Expired });
-        assert_eq!(q.drain_close_requests(), expected);
+        push(&q, id, mk(0, "App"));
+        q.request_close(id, CloseReason::Expired);
+        let requests = q.drain_close_requests();
+        assert_eq!(requests.len(), KEEP * 2);
+        assert_eq!(requests.first().unwrap().revision, 2);
+        assert_eq!(requests.last().unwrap().revision, (KEEP * 2 + 1) as u64);
     }
 
     #[test]

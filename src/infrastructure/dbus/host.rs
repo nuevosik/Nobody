@@ -1,50 +1,30 @@
-use zbus::fdo::RequestNameReply;
-
 use crate::application::{clock, commands, config::Config};
 use crate::domain::close::CloseReason;
 use crate::domain::queue::Queue;
+use crate::infrastructure::activation;
 use crate::infrastructure::dbus::control::{CONTROL_PATH, ControlService};
 use crate::infrastructure::dbus::daemon::{self, NOTIFICATION_PATH, NotificationDaemon};
 
-pub async fn serve(queue: Queue, config: Config) -> Option<zbus::Connection> {
-    let conn = match zbus::Connection::session().await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "nobody: não foi possível conectar ao session bus ({e}). Verifique DBUS_SESSION_BUS_ADDRESS."
-            );
-            return None;
-        }
-    };
+pub const NOTIFICATION_SERVICE: &str = "org.freedesktop.Notifications";
 
+pub fn is_retryable(error: &zbus::Error) -> bool {
+    matches!(
+        error,
+        zbus::Error::Connection(_, _) | zbus::Error::InputOutput(_) | zbus::Error::Handshake(_)
+    )
+}
+
+pub async fn serve(queue: Queue, config: Config) -> zbus::Result<zbus::Connection> {
     let daemon = NotificationDaemon { queue: queue.clone(), config };
-    if let Err(e) = conn.object_server().at(NOTIFICATION_PATH, daemon).await {
-        eprintln!("nobody: register interface: {e}");
-        return None;
-    }
-
-    let control = ControlService { queue: queue.clone() };
-    if let Err(e) = conn.object_server().at(CONTROL_PATH, control).await {
-        eprintln!("nobody: register control interface: {e}");
-        return None;
-    }
-
-    let name = "org.freedesktop.Notifications";
-    match conn.request_name_with_flags(name, zbus::fdo::RequestNameFlags::DoNotQueue.into()).await {
-        Ok(RequestNameReply::PrimaryOwner) | Ok(RequestNameReply::AlreadyOwner) => {}
-        Ok(_) => {
-            eprintln!(
-                "nobody: outro daemon ocupa {name}. Pare o mako: systemctl --user stop mako && pkill mako"
-            );
-            return None;
-        }
-        Err(e) => {
-            eprintln!("nobody: request_name {name}: {e}");
-            return None;
-        }
-    }
-
-    Some(conn)
+    let control = ControlService { queue };
+    zbus::connection::Builder::session()?
+        .name(NOTIFICATION_SERVICE)?
+        .allow_name_replacements(false)
+        .replace_existing_names(false)
+        .serve_at(NOTIFICATION_PATH, daemon)?
+        .serve_at(CONTROL_PATH, control)?
+        .build()
+        .await
 }
 
 pub async fn flush_lifecycle_events(connection: &zbus::Connection) {
@@ -60,8 +40,6 @@ pub async fn flush_lifecycle_events(connection: &zbus::Connection) {
         }
     };
 
-    // Serialize validation, signals and removal with Notify/CloseNotification.
-    // ponytail: one interface lock; use per-ID serialization if signal I/O becomes a bottleneck.
     let daemon = interface.get_mut().await;
     let queue = &daemon.queue;
 
@@ -78,7 +56,7 @@ pub async fn flush_lifecycle_events(connection: &zbus::Connection) {
     }
 
     for request in queue.drain_close_requests() {
-        if queue.remove(request.id).is_none() {
+        if queue.remove_if_current(request.id, request.revision).is_none() {
             continue;
         }
         if let Err(error) =
@@ -90,24 +68,27 @@ pub async fn flush_lifecycle_events(connection: &zbus::Connection) {
     }
 
     for request in queue.drain_action_requests() {
-        if queue.has_pending_close(request.id) {
+        if queue.has_pending_close(request.id, request.revision) {
             continue;
         }
-        let active_action = queue.snapshot().into_iter().find(|notice| {
-            notice.id == request.id
-                && notice.has_action(&request.key)
-                && !notice.is_expired_at(clock::now_ms())
-        });
-        if active_action.is_none() {
+        let Some((desktop_entry, app)) = queue.action_target_if_current(
+            request.id,
+            request.revision,
+            &request.key,
+            clock::now_ms(),
+        ) else {
             continue;
-        }
+        };
         if let Err(error) =
             daemon::emit_action_invoked(interface.signal_emitter(), request.id, &request.key).await
         {
             eprintln!("nobody: falha ao sinalizar ação de {}: {error}", request.id);
             continue;
         }
-        if queue.remove(request.id).is_none() {
+        if request.key == "default" {
+            blocking::unblock(move || activation::focus_application(desktop_entry, app)).detach();
+        }
+        if queue.remove_if_current(request.id, request.revision).is_none() {
             continue;
         }
         if let Err(error) = daemon::emit_notification_closed(

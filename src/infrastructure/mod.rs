@@ -1,3 +1,4 @@
+pub mod activation;
 pub mod config;
 pub mod dbus;
 pub mod fullscreen;

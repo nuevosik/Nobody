@@ -1,6 +1,9 @@
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use super::lookup::resolve_named_icon;
+
+const MAX_DESKTOP_BYTES: usize = 16 * 1024;
 
 pub(crate) fn icon_from_desktop(id: &str) -> Option<PathBuf> {
     let id = id.trim().trim_end_matches(".desktop");
@@ -33,8 +36,16 @@ pub(crate) fn icon_from_desktop(id: &str) -> Option<PathBuf> {
 }
 
 pub(crate) fn desktop_icon_key(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    if text.len() > 16 * 1024 {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_DESKTOP_BYTES as u64 + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    if text.len() > MAX_DESKTOP_BYTES {
         return None;
     }
     let mut in_entry = false;
@@ -102,5 +113,30 @@ mod tests {
         std::fs::remove_file(&file).ok();
         std::fs::remove_dir(&dir).ok();
         assert!(got.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_fifo_is_rejected_without_blocking() {
+        let dir = std::env::temp_dir().join(format!("nobody-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("fifo.desktop");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if made {
+            let path = fifo.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(desktop_icon_key(&path));
+            });
+            let got = rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("desktop_icon_key must not block on a FIFO");
+            assert!(got.is_none());
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

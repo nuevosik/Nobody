@@ -26,6 +26,7 @@ impl CloseReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CloseRequest {
     pub id: u32,
+    pub revision: u64,
     pub reason: CloseReason,
 }
 
@@ -62,6 +63,7 @@ mod tests {
         let notice = Notice {
             id: 9,
             app: "A".into(),
+            desktop_entry: None,
             summary: "s".into(),
             body: "".into(),
             icon: None,

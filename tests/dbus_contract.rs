@@ -337,6 +337,7 @@ fn notify_pipeline_expire_runs_before_push() {
         Notice {
             id: 0,
             app: "Old".into(),
+            desktop_entry: None,
             summary: "s".into(),
             body: String::new(),
             icon: None,
@@ -356,6 +357,7 @@ fn notify_pipeline_expire_runs_before_push() {
         Notice {
             id: 0,
             app: "New".into(),
+            desktop_entry: None,
             summary: "s".into(),
             body: String::new(),
             icon: None,

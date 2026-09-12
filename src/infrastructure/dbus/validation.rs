@@ -6,10 +6,21 @@ use crate::domain::notice::is_valid_stack_tag;
 
 pub const MAX_SUMMARY_LEN: usize = 200;
 pub const MAX_BODY_LEN: usize = 500;
+pub(crate) const MAX_MARKUP_INPUT_LEN: usize = 4096;
 pub const MAX_ACTIONS: usize = 20;
 pub const MAX_ACTION_LEN: usize = 64;
 pub const MAX_HINTS: usize = 64;
 pub const MAX_ICON_LEN: usize = 512;
+pub const MAX_DESKTOP_ENTRY_LEN: usize = 255;
+
+pub(crate) fn desktop_entry(hints: &HashMap<String, OwnedValue>) -> Option<String> {
+    ["desktop-entry", "desktop_entry"]
+        .into_iter()
+        .filter_map(|key| hints.get(key))
+        .filter_map(|value| String::try_from(value.try_clone().ok()?).ok())
+        .map(|entry| truncate(entry.trim().trim_end_matches(".desktop"), MAX_DESKTOP_ENTRY_LEN))
+        .find(|entry| !entry.is_empty())
+}
 
 pub(crate) fn stack_tag(hints: &HashMap<String, OwnedValue>) -> Option<String> {
     ["x-dunst-stack-tag", "x-canonical-private-synchronous"]
@@ -43,10 +54,7 @@ pub(crate) fn actions(input: &[String]) -> Vec<String> {
 }
 
 pub fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    s.chars().take(max).collect()
+    s.char_indices().nth(max).map_or(s, |(end, _)| &s[..end]).to_string()
 }
 
 pub(crate) fn is_critical(hints: &HashMap<String, OwnedValue>) -> bool {
@@ -92,6 +100,9 @@ mod tests {
     #[test]
     fn truncate_limits() {
         assert_eq!(truncate("abcdef", 3), "abc");
+        assert_eq!(truncate("🦀🦀🦀", 2), "🦀🦀");
+        let oversized = "<".repeat(MAX_MARKUP_INPUT_LEN + 1);
+        assert_eq!(truncate(&oversized, MAX_MARKUP_INPUT_LEN).len(), MAX_MARKUP_INPUT_LEN);
     }
 
     #[test]
@@ -145,6 +156,27 @@ mod tests {
         assert_eq!(progress(&HashMap::new()), None);
         let unsigned = HashMap::from([("value".into(), OwnedValue::from(50_u8))]);
         assert_eq!(progress(&unsigned), None);
+    }
+
+    #[test]
+    fn desktop_entry_accepts_both_standard_spellings_and_caps_the_value() {
+        let standard = HashMap::from([(
+            "desktop-entry".into(),
+            OwnedValue::try_from(zbus::zvariant::Value::from("org.example.App.desktop")).unwrap(),
+        )]);
+        assert_eq!(desktop_entry(&standard).as_deref(), Some("org.example.App"));
+
+        let legacy = HashMap::from([(
+            "desktop_entry".into(),
+            OwnedValue::try_from(zbus::zvariant::Value::from(" legacy ")).unwrap(),
+        )]);
+        assert_eq!(desktop_entry(&legacy).as_deref(), Some("legacy"));
+
+        let oversized = HashMap::from([(
+            "desktop-entry".into(),
+            OwnedValue::try_from(zbus::zvariant::Value::from("x".repeat(300))).unwrap(),
+        )]);
+        assert_eq!(desktop_entry(&oversized).unwrap().len(), MAX_DESKTOP_ENTRY_LEN);
     }
 
     #[test]

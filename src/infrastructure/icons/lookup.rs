@@ -24,7 +24,7 @@ pub(crate) fn lookup_named_icon(name: &str) -> Option<PathBuf> {
             path.extension()
                 .and_then(|e| e.to_str())
                 .map(|e| e.to_ascii_lowercase()),
-            Some(ref e) if matches!(e.as_str(), "png" | "svg" | "jpg" | "jpeg" | "webp")
+            Some(ref e) if matches!(e.as_str(), "png" | "jpg" | "jpeg" | "webp")
         ) {
             return None;
         }
@@ -59,27 +59,22 @@ pub(crate) fn lookup_named_icon(name: &str) -> Option<PathBuf> {
 
     for root in &roots {
         for size in SIZES {
-            for ext in ["svg", "png"] {
-                let path =
-                    root.join("hicolor").join(size).join("apps").join(format!("{name}.{ext}"));
-                if path.is_file() {
-                    return Some(path);
-                }
-                let path = root.join(size).join("apps").join(format!("{name}.{ext}"));
-                if path.is_file() {
-                    return Some(path);
-                }
-                let path = root.join(size).join(format!("{name}.{ext}"));
-                if path.is_file() {
-                    return Some(path);
-                }
-            }
-        }
-        for ext in ["svg", "png"] {
-            let path = root.join(format!("{name}.{ext}"));
+            let path = root.join("hicolor").join(size).join("apps").join(format!("{name}.png"));
             if path.is_file() {
                 return Some(path);
             }
+            let path = root.join(size).join("apps").join(format!("{name}.png"));
+            if path.is_file() {
+                return Some(path);
+            }
+            let path = root.join(size).join(format!("{name}.png"));
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        let path = root.join(format!("{name}.png"));
+        if path.is_file() {
+            return Some(path);
         }
     }
 
@@ -93,6 +88,15 @@ mod tests {
     #[test]
     fn oversized_icon_names_are_ignored() {
         assert!(resolve_named_icon(&"a".repeat(513)).is_none());
+    }
+
+    #[test]
+    fn absolute_svg_paths_are_ignored() {
+        let path =
+            std::env::temp_dir().join(format!("nobody-untrusted-{}.svg", std::process::id()));
+        std::fs::write(&path, b"<svg/>").unwrap();
+        assert!(lookup_named_icon(path.to_str().unwrap()).is_none());
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

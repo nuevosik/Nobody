@@ -23,9 +23,12 @@ pub fn parse_quiet(out: &str) -> bool {
     })
 }
 
-fn query_command(command: &mut Command, timeout: std::time::Duration) -> bool {
+pub(crate) fn command_output(
+    command: &mut Command,
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
     let Ok(mut child) = command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else {
-        return false;
+        return None;
     };
     let stdout = child.stdout.take().expect("stdout is piped");
     let reader = std::thread::spawn(move || {
@@ -46,11 +49,13 @@ fn query_command(command: &mut Command, timeout: std::time::Duration) -> bool {
             }
         }
     };
-    reader
-        .join()
-        .ok()
-        .and_then(Result::ok)
-        .is_some_and(|bytes| success && parse_quiet(&String::from_utf8_lossy(&bytes)))
+    let bytes = reader.join().ok().and_then(Result::ok)?;
+    success.then_some(bytes)
+}
+
+fn query_command(command: &mut Command, timeout: std::time::Duration) -> bool {
+    command_output(command, timeout)
+        .is_some_and(|bytes| parse_quiet(&String::from_utf8_lossy(&bytes)))
 }
 
 fn query() -> bool {

@@ -12,9 +12,6 @@ pub fn expire(queue: &Queue, now_ms: u128) -> Vec<Notice> {
 }
 
 pub fn request_dismissal(queue: &Queue, id: u32) {
-    if !snapshot(queue).iter().any(|notice| notice.id == id) {
-        return;
-    }
     queue.request_close(id, CloseReason::DismissedByUser);
 }
 
@@ -100,12 +97,11 @@ pub fn toggle_center(queue: &Queue) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::close::CloseRequest;
-
     fn mk(app: &str, expire_ms: i32, arrived_at_ms: u128) -> Notice {
         Notice {
             id: 0,
             app: app.into(),
+            desktop_entry: None,
             summary: "s".into(),
             body: "".into(),
             icon: None,
@@ -136,10 +132,11 @@ mod tests {
         let queue = Queue::new();
         let id = queue.push_with_outcome(0, mk("App", 0, 1)).id;
         request_dismissal(&queue, id);
-        assert_eq!(
-            queue.drain_close_requests(),
-            vec![CloseRequest { id, reason: CloseReason::DismissedByUser }]
-        );
+        let requests = queue.drain_close_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, id);
+        assert!(requests[0].revision > 0);
+        assert_eq!(requests[0].reason, CloseReason::DismissedByUser);
     }
 
     #[test]
@@ -157,10 +154,11 @@ mod tests {
         let id = queue.push_with_outcome(0, notice).id;
         request_default_action(&queue, id);
         request_default_action(&queue, id);
-        assert_eq!(
-            queue.drain_action_requests(),
-            vec![crate::domain::action::ActionRequest { id, key: "default".into() }]
-        );
+        let requests = queue.drain_action_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].id, id);
+        assert!(requests[0].revision > 0);
+        assert_eq!(requests[0].key, "default");
         request_default_action(&queue, id + 1);
         assert!(queue.drain_action_requests().is_empty());
     }
@@ -175,13 +173,11 @@ mod tests {
 
         dismiss_all(&queue);
 
-        assert_eq!(
-            queue.drain_close_requests(),
-            active_ids
-                .into_iter()
-                .map(|id| CloseRequest { id, reason: CloseReason::DismissedByUser })
-                .collect::<Vec<_>>()
-        );
+        let requests = queue.drain_close_requests();
+        assert_eq!(requests.iter().map(|request| request.id).collect::<Vec<_>>(), active_ids);
+        assert!(requests.iter().all(|request| {
+            request.revision > 0 && request.reason == CloseReason::DismissedByUser
+        }));
         assert_eq!(snapshot(&queue).len(), 2);
         assert_eq!(history(&queue), history_before);
 
@@ -210,13 +206,10 @@ mod tests {
         dismiss_app(&queue, "Spotify");
         let later_id = queue.push_with_outcome(0, mk("Spotify", 0, 5)).id;
         let requests = queue.drain_close_requests();
-        assert_eq!(
-            requests,
-            spotify_ids
-                .into_iter()
-                .map(|id| CloseRequest { id, reason: CloseReason::DismissedByUser })
-                .collect::<Vec<_>>()
-        );
+        assert_eq!(requests.iter().map(|request| request.id).collect::<Vec<_>>(), spotify_ids);
+        assert!(requests.iter().all(|request| {
+            request.revision > 0 && request.reason == CloseReason::DismissedByUser
+        }));
         assert!(!requests.iter().any(|request| request.id == later_id));
         let history_after = history(&queue);
         assert_eq!(history_after.len(), history_before.len() + 1);
@@ -263,6 +256,7 @@ mod tests {
             notice: Notice {
                 id: 1,
                 app: app.into(),
+                desktop_entry: None,
                 summary: summary.into(),
                 body: body.into(),
                 icon: None,

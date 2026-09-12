@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{LazyLock, Mutex};
 use zbus::fdo;
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
@@ -10,12 +11,84 @@ use crate::domain::notice::Notice;
 use crate::domain::queue::Queue;
 use crate::infrastructure::dbus::markup::strip_markup;
 use crate::infrastructure::dbus::validation::{
-    MAX_BODY_LEN, MAX_HINTS, MAX_ICON_LEN, MAX_SUMMARY_LEN, actions as parse_actions, is_critical,
-    progress, stack_tag, truncate,
+    MAX_BODY_LEN, MAX_HINTS, MAX_ICON_LEN, MAX_MARKUP_INPUT_LEN, MAX_SUMMARY_LEN,
+    actions as parse_actions, desktop_entry, is_critical, progress, stack_tag, truncate,
 };
 use crate::infrastructure::icons::resolve_notice_icon;
 
 pub const NOTIFICATION_PATH: &str = "/org/freedesktop/Notifications";
+const MAX_ICON_JOBS: usize = crate::domain::queue::KEEP;
+static ICON_JOBS: LazyLock<Mutex<IconJobs>> = LazyLock::new(|| Mutex::new(IconJobs::default()));
+
+struct IconJob {
+    queue: Queue,
+    id: u32,
+    revision: u64,
+    app: String,
+    app_icon: String,
+    hints: HashMap<String, OwnedValue>,
+}
+
+impl IconJob {
+    fn is_current(&self) -> bool {
+        self.queue.is_current_revision(self.id, self.revision)
+    }
+
+    fn run(self) {
+        if !self.is_current() {
+            return;
+        }
+        let icon = crate::infrastructure::spotify::spotify_cover(&self.app, &self.hints)
+            .or_else(|| resolve_notice_icon(&self.app_icon, &self.app, &self.hints));
+        if let Some(icon) = icon {
+            self.queue.set_icon_if_current(self.id, self.revision, icon);
+        }
+    }
+}
+
+#[derive(Default)]
+struct IconJobs {
+    active: usize,
+    pending: VecDeque<IconJob>,
+}
+
+impl IconJobs {
+    fn enqueue(&mut self, job: IconJob) -> bool {
+        self.pending.retain(IconJob::is_current);
+        if self.pending.len() >= MAX_ICON_JOBS {
+            self.pending.pop_front();
+        }
+        self.pending.push_back(job);
+        if self.active >= MAX_ICON_JOBS {
+            return false;
+        }
+        self.active += 1;
+        true
+    }
+
+    fn next_job(&mut self) -> Option<IconJob> {
+        let job = self.pending.pop_front();
+        if job.is_none() {
+            self.active -= 1;
+        }
+        job
+    }
+}
+
+fn enqueue_icon_job(job: IconJob) {
+    if ICON_JOBS.lock().unwrap_or_else(|error| error.into_inner()).enqueue(job) {
+        blocking::unblock(|| {
+            loop {
+                let job = ICON_JOBS.lock().unwrap_or_else(|error| error.into_inner()).next_job();
+                let Some(job) = job else {
+                    break;
+                };
+                job.run();
+            }
+        })
+        .detach();
+    }
+}
 
 pub struct NotificationDaemon {
     pub queue: Queue,
@@ -41,8 +114,10 @@ impl NotificationDaemon {
             emit_closed_for_call(&emitter, notice.id, CloseReason::Expired).await?;
         }
 
-        let summary = truncate(&strip_markup(summary), MAX_SUMMARY_LEN);
-        let body = truncate(&strip_markup(body), MAX_BODY_LEN);
+        let summary = truncate(summary, MAX_MARKUP_INPUT_LEN);
+        let body = truncate(body, MAX_MARKUP_INPUT_LEN);
+        let summary = truncate(&strip_markup(&summary), MAX_SUMMARY_LEN);
+        let body = truncate(&strip_markup(&body), MAX_BODY_LEN);
         let app = if app_name.trim().is_empty() {
             String::from("App")
         } else {
@@ -52,29 +127,23 @@ impl NotificationDaemon {
         let actions = parse_actions(&actions);
         let tag = stack_tag(&hints);
         let progress = progress(&hints);
+        let is_crit = is_critical(&hints);
+        let desktop_entry = desktop_entry(&hints);
         let hints_limited: HashMap<String, OwnedValue> = if hints.len() > MAX_HINTS {
             hints.into_iter().take(MAX_HINTS).collect()
         } else {
             hints
         };
         let app_icon_trunc = truncate(app_icon, MAX_ICON_LEN);
-        let is_crit = is_critical(&hints_limited);
-
         let icon_app = app.clone();
-        let icon_str = app_icon_trunc.clone();
-        let hints_clone = hints_limited.clone();
-        let icon = blocking::unblock(move || {
-            crate::infrastructure::spotify::spotify_cover(&icon_app, &hints_clone)
-                .or_else(|| resolve_notice_icon(&icon_str, &icon_app, &hints_clone))
-        })
-        .await;
 
         let notice = Notice {
             id: 0,
             app,
+            desktop_entry,
             summary,
             body,
-            icon,
+            icon: None,
             actions,
             expire_ms: policy::effective_expire_timeout_with_default(
                 expire_timeout,
@@ -85,13 +154,23 @@ impl NotificationDaemon {
             stack_tag: tag,
             progress,
         };
-        let outcome = self.queue.push_with_outcome(replaces_id, notice);
+        let (outcome, revision) = self.queue.push_with_revision(replaces_id, notice);
+        let id = outcome.id;
 
         for notice in outcome.evicted {
             emit_closed_for_call(&emitter, notice.id, CloseReason::Undefined).await?;
         }
 
-        Ok(outcome.id)
+        enqueue_icon_job(IconJob {
+            queue: self.queue.clone(),
+            id,
+            revision,
+            app: icon_app,
+            app_icon: app_icon_trunc,
+            hints: hints_limited,
+        });
+
+        Ok(id)
     }
 
     async fn close_notification(
@@ -190,5 +269,49 @@ mod tests {
         assert!(caps.contains(&"x-canonical-private-synchronous".to_string()));
         assert!(caps.contains(&"value".to_string()));
         assert!(!caps.contains(&"body-markup".to_string()));
+    }
+
+    #[test]
+    fn pending_icon_jobs_keep_current_revisions_within_the_queue_limit() {
+        let queue = Queue::new();
+        let mut jobs = IconJobs { active: MAX_ICON_JOBS, ..IconJobs::default() };
+        let mut replacement_id = 0;
+        for index in 0..MAX_ICON_JOBS * 4 {
+            let (outcome, revision) = queue.push_with_revision(
+                if index % 2 == 0 { 0 } else { replacement_id },
+                Notice {
+                    id: 0,
+                    app: "App".into(),
+                    desktop_entry: None,
+                    summary: index.to_string(),
+                    body: String::new(),
+                    icon: None,
+                    actions: Vec::new(),
+                    expire_ms: 0,
+                    arrived_at_ms: 0,
+                    stack_tag: None,
+                    progress: None,
+                },
+            );
+            replacement_id = outcome.id;
+            assert!(!jobs.enqueue(IconJob {
+                queue: queue.clone(),
+                id: outcome.id,
+                revision,
+                app: "App".into(),
+                app_icon: String::new(),
+                hints: HashMap::new(),
+            }));
+            assert!(jobs.pending.len() <= MAX_ICON_JOBS);
+            assert!(jobs.pending.iter().all(IconJob::is_current));
+        }
+        let active = queue.snapshot();
+        let mut pending_ids = Vec::new();
+        while let Some(job) = jobs.next_job() {
+            pending_ids.push(job.id);
+        }
+        assert_eq!(pending_ids.len(), active.len());
+        assert!(active.iter().all(|notice| pending_ids.contains(&notice.id)));
+        assert_eq!(jobs.active, MAX_ICON_JOBS - 1);
     }
 }

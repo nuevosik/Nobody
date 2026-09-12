@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
-use std::process::Command;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use zbus::zvariant::OwnedValue;
 
@@ -10,8 +14,10 @@ const SPOTIFY_BUS: &str = "org.mpris.MediaPlayer2.spotify";
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const PLAYER_IFACE: &str = "org.mpris.MediaPlayer2.Player";
 const ART_URL_KEY: &str = "mpris:artUrl";
+const MPRIS_TIMEOUT: Duration = Duration::from_secs(2);
 const CURL_TIMEOUT_S: &str = "10";
-const MAX_BYTES: &str = "5242880";
+const MAX_BYTES: usize = 5 * 1024 * 1024;
+static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn is_spotify(app: &str, hints: &HashMap<String, OwnedValue>) -> bool {
     if app.trim().eq_ignore_ascii_case("spotify") {
@@ -31,16 +37,39 @@ pub fn spotify_cover(app: &str, hints: &HashMap<String, OwnedValue>) -> Option<P
     }
     let url = mpris_art_url()?;
     if let Some(path) = file_url_to_path(&url) {
-        return path.exists().then_some(path);
+        return path.is_file().then_some(path);
     }
-    if url.starts_with("http://") || url.starts_with("https://") {
+    if allowed_art_host(&url) {
         return cached_download(&url);
     }
     None
 }
 
+fn allowed_art_host(url: &str) -> bool {
+    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"));
+    let Some(rest) = rest else {
+        return false;
+    };
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    host.ends_with(".scdn.co") || host.ends_with(".spotifycdn.com")
+}
+
 fn mpris_art_url() -> Option<String> {
-    let conn = zbus::blocking::Connection::session().ok()?;
+    let conn = zbus::blocking::connection::Builder::session()
+        .ok()?
+        .method_timeout(MPRIS_TIMEOUT)
+        .build()
+        .ok()?;
     let proxy = zbus::blocking::Proxy::new(
         &conn,
         SPOTIFY_BUS,
@@ -104,35 +133,56 @@ fn cached_download(url: &str) -> Option<PathBuf> {
         let stem = format!("{:016x}", hasher.finish());
         for ext in ["jpg", "jpeg", "png", "webp"] {
             let p = dir.join(format!("{stem}.{ext}"));
-            if p.exists() {
+            if p.symlink_metadata().ok().is_some_and(|meta| meta.file_type().is_file()) {
                 return Some(p);
             }
         }
     }
-    let tmp = std::env::temp_dir().join(format!("nobody-cover-{}", std::process::id()));
-    let out = Command::new("curl")
-        .args([
-            "-fsSL",
-            "--max-time",
-            CURL_TIMEOUT_S,
-            "--max-filesize",
-            MAX_BYTES,
-            "-o",
-            &tmp.to_string_lossy(),
-            url,
-        ])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|_| std::fs::read(&tmp).ok())?;
-    std::fs::remove_file(&tmp).ok();
+    let max_bytes = MAX_BYTES.to_string();
+    let mut child = Command::new("curl")
+        .args(["-fsSL", "--max-time", CURL_TIMEOUT_S, "--max-filesize", &max_bytes, url])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut out = Vec::new();
+    let read = child.stdout.take()?.take(MAX_BYTES as u64 + 1).read_to_end(&mut out);
+    if read.is_err() || out.len() > MAX_BYTES {
+        child.kill().ok();
+    }
+    let status = child.wait().ok()?;
+    read.ok()?;
+    if !status.success() || out.len() > MAX_BYTES {
+        return None;
+    }
     if out.is_empty() {
         return None;
     }
     let ext = image::guess_format(&out).ok()?.extensions_str().first()?;
     let dest = cache_path_for(url, ext)?;
-    std::fs::write(&dest, &out).ok()?;
+    write_cache(&dest, &out)?;
     Some(dest)
+}
+
+fn write_cache(dest: &Path, bytes: &[u8]) -> Option<()> {
+    for _ in 0..8 {
+        let tmp = dest.with_extension(format!(
+            "tmp-{}-{}",
+            std::process::id(),
+            NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let Ok(mut file) = File::create_new(&tmp) else {
+            continue;
+        };
+        let written = file.write_all(bytes).is_ok();
+        drop(file);
+        if written && std::fs::rename(&tmp, dest).is_ok() {
+            return Some(());
+        }
+        std::fs::remove_file(&tmp).ok();
+        return None;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -213,5 +263,43 @@ mod tests {
         assert!(
             file_url_to_path("file:///nonexistent-nobody-xyz.png").is_some_and(|p| !p.exists())
         );
+    }
+
+    #[test]
+    fn art_host_allowlist_blocks_ssrf() {
+        assert!(allowed_art_host("https://i.scdn.co/image/abc"));
+        assert!(allowed_art_host("http://mosaic.scdn.co/640/abc"));
+        assert!(allowed_art_host("https://image-cdn-fa.spotifycdn.com/image/abc"));
+        assert!(allowed_art_host("https://i.scdn.co:443/image/abc"));
+        assert!(!allowed_art_host("http://127.0.0.1:8080/x"));
+        assert!(!allowed_art_host("http://169.254.169.254/latest/meta-data/"));
+        assert!(!allowed_art_host("https://evil.example/spotify"));
+        assert!(!allowed_art_host("https://evilscdn.co/x"));
+        assert!(!allowed_art_host("file:///etc/passwd"));
+        assert!(!allowed_art_host("ftp://i.scdn.co/x"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_write_replaces_symlink_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!(
+            "nobody-cache-test-{}-{}",
+            std::process::id(),
+            NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let target = dir.join("target");
+        let dest = dir.join("cover.jpg");
+        std::fs::write(&target, b"keep").unwrap();
+        symlink(&target, &dest).unwrap();
+
+        assert_eq!(write_cache(&dest, b"image"), Some(()));
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"image");
+        assert!(std::fs::symlink_metadata(&dest).unwrap().file_type().is_file());
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

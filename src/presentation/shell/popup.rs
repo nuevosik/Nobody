@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use gpui::{FontWeight, ParentElement, Styled, StyledImage, div, img, prelude::*, px, relative};
@@ -17,7 +19,11 @@ pub fn badge_initial(app: &str) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
-pub fn badge(icon: Option<&std::path::PathBuf>, app: &str) -> gpui::Div {
+pub fn badge<T: 'static>(
+    icon: Option<&std::path::PathBuf>,
+    app: &str,
+    cx: &gpui::Context<'_, T>,
+) -> gpui::Div {
     let base = div()
         .size(px(32.))
         .rounded(px(8.))
@@ -27,42 +33,26 @@ pub fn badge(icon: Option<&std::path::PathBuf>, app: &str) -> gpui::Div {
         .justify_center();
 
     if let Some(path) = icon {
+        start_icon_load(path, cx);
         if let Some(rendered) = icon_image(path) {
             return base.child(
                 img(rendered).size(px(32.)).rounded(px(8.)).object_fit(gpui::ObjectFit::Cover),
             );
         }
-        let initial = badge_initial(app);
-        base.child(
-            img(path.clone())
-                .size(px(32.))
-                .rounded(px(8.))
-                .object_fit(gpui::ObjectFit::Cover)
-                .with_fallback(move || {
-                    div()
-                        .size(px(32.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(TEXT_BADGE))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(fade(MUTED, 1.))
-                        .child(initial.clone())
-                        .into_any_element()
-                }),
-        )
-    } else {
-        let initial = badge_initial(app);
-        base.font(app_font())
-            .text_size(px(TEXT_BADGE))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(fade(MUTED, 1.))
-            .child(initial)
     }
+
+    base.font(app_font())
+        .text_size(px(TEXT_BADGE))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(fade(MUTED, 1.))
+        .child(badge_initial(app))
 }
 
 const BADGE_PX: u32 = 64;
-
+const MAX_ICON_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_ICON_DIMENSION: u32 = 2048;
+const MAX_ICON_ALLOC: u64 = 24 * 1024 * 1024;
+const MAX_RASTER_JOBS: usize = 4;
 const RASTER_CACHE_LIMIT: usize = 256;
 
 #[derive(Default)]
@@ -86,18 +76,77 @@ impl RasterCache {
 }
 
 static RASTER: LazyLock<Mutex<RasterCache>> = LazyLock::new(|| Mutex::new(RasterCache::default()));
+static ACTIVE_RASTER_JOBS: AtomicUsize = AtomicUsize::new(0);
+
+fn start_icon_load<T: 'static>(path: &Path, cx: &gpui::Context<'_, T>) {
+    let path = path.to_path_buf();
+    let mut cache = RASTER.lock().unwrap_or_else(|error| error.into_inner());
+    if cache.images.contains_key(&path)
+        || ACTIVE_RASTER_JOBS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_RASTER_JOBS).then_some(active + 1)
+            })
+            .is_err()
+    {
+        return;
+    }
+    cache.insert(path.clone(), None);
+    drop(cache);
+
+    let task = cx.background_executor().spawn(async move {
+        let image = decode_badge_icon(&path);
+        RASTER.lock().unwrap_or_else(|error| error.into_inner()).insert(path, image);
+        ACTIVE_RASTER_JOBS.fetch_sub(1, Ordering::AcqRel);
+    });
+    cx.spawn(async move |this, cx| {
+        task.await;
+        _ = this.update(cx, |_, cx| cx.notify());
+    })
+    .detach();
+}
 
 fn icon_image(path: &Path) -> Option<Arc<gpui::RenderImage>> {
-    if let Some(hit) = RASTER.lock().unwrap_or_else(|e| e.into_inner()).images.get(path).cloned() {
-        return hit;
-    }
-    let found = decode_badge_icon(path);
-    RASTER.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf(), found.clone());
-    found
+    RASTER.lock().unwrap_or_else(|error| error.into_inner()).images.get(path).cloned().flatten()
 }
 
 fn decode_badge_icon(path: &Path) -> Option<Arc<gpui::RenderImage>> {
-    let small = image::open(path)
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+    {
+        return None;
+    }
+    let metadata = path.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_ICON_BYTES {
+        return None;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_ICON_BYTES + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_ICON_BYTES {
+        return None;
+    }
+
+    let mut reader =
+        image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_ICON_DIMENSION);
+    limits.max_image_height = Some(MAX_ICON_DIMENSION);
+    limits.max_alloc = Some(MAX_ICON_ALLOC);
+    reader.limits(limits);
+    let small = reader
+        .decode()
         .ok()?
         .resize(BADGE_PX, BADGE_PX, image::imageops::FilterType::Lanczos3)
         .into_rgba8();
@@ -218,13 +267,67 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("red.png");
         image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255])).save(&path).unwrap();
-        let a = icon_image(&path).expect("png decodifica");
+        assert!(icon_image(&path).is_none(), "render must not decode an uncached path");
+        let a = decode_badge_icon(&path).expect("png decodifica");
+        RASTER
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(path.clone(), Some(a.clone()));
         let bytes = a.as_bytes(0).expect("um frame");
         assert_eq!(bytes.len(), 64 * 64 * 4);
         assert_eq!(&bytes[..4], &[0, 0, 255, 255]);
         assert!(Arc::ptr_eq(&a, &icon_image(&path).expect("cache hit")));
         std::fs::remove_dir_all(&dir).ok();
         assert!(decode_badge_icon(Path::new("/nonexistent-xyz.png")).is_none());
+    }
+
+    #[test]
+    fn badge_icon_decoder_enforces_source_bounds_and_rejects_svg() {
+        let dir = std::env::temp_dir().join(format!("nobody-badge-limits-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let too_wide = dir.join("wide.png");
+        image::RgbaImage::new(MAX_ICON_DIMENSION + 1, 1).save(&too_wide).unwrap();
+        assert!(decode_badge_icon(&too_wide).is_none());
+
+        let too_large = dir.join("large.png");
+        std::fs::File::create(&too_large).unwrap().set_len(MAX_ICON_BYTES + 1).unwrap();
+        assert!(decode_badge_icon(&too_large).is_none());
+
+        let svg = dir.join("icon.svg");
+        std::fs::write(
+            &svg,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20"><rect width="10" height="20" fill="red"/></svg>"#,
+        )
+        .unwrap();
+        assert!(decode_badge_icon(&svg).is_none());
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn badge_icon_decoder_rejects_fifo_without_blocking() {
+        let dir = std::env::temp_dir().join(format!("nobody-badge-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("icon.png");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if made {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send(decode_badge_icon(&fifo));
+            });
+            assert!(
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .expect("FIFO decode must return")
+                    .is_none()
+            );
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -245,6 +348,7 @@ mod tests {
         Notice {
             id: 1,
             app: app.into(),
+            desktop_entry: None,
             summary: summary.into(),
             body: body.into(),
             icon: None,

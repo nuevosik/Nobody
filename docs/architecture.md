@@ -30,13 +30,17 @@ Guards in CI (must print nothing):
   DND and center toggles, CLI arg parsing, monotonic clock. No I/O.
 - **infrastructure/dbus** (`daemon.rs`, `host.rs`, `control.rs`, `validation.rs`,
   `markup.rs`) — `org.freedesktop.Notifications` adapter: validates and
-  truncates payloads, strips markup, owns the bus name, flushes lifecycle
-  events every 100ms. `control.rs` serves the separate `com.nobody.Control`
+  truncates payloads, strips markup, owns the bus name before opening the UI,
+  reconnects after transport loss and flushes lifecycle events every 100ms.
+  `control.rs` serves the separate `com.nobody.Control`
   interface (`/com/nobody/Control`) and holds the blocking client used by
   the CLI commands (no GUI init).
 - **infrastructure/icons** (`resolver.rs`, `lookup.rs`, `desktop.rs`,
   `cache.rs`) — icon lookup scoped to known locations (name, hint,
   desktop-entry).
+- **infrastructure/activation** (`activation.rs`) — Hyprland-only focus for the
+  `default` action: picks the most recent mapped window matching
+  `desktop-entry` or app name and dispatches `hl.dsp.focus`; no-ops elsewhere.
 - **presentation** (`theme.rs`, `shell/window.rs`, `feed.rs`, `geometry.rs`,
   `popup.rs`, `anim.rs`) — layer-shell overlay: polls `snapshot`, diffs by
   id, draws at most 5 cards with enter/exit animation.
@@ -44,9 +48,9 @@ Guards in CI (must print nothing):
 ## Data flow
 
 `Notify` → expire pending (`commands::expire`) → validate/truncate →
-`strip_markup` → resolve icon on a blocking thread →
-`policy::effective_expire_timeout` → `queue::push_with_outcome` → emit
-`NotificationClosed`. Render: window ticker reads `snapshot`, `feed` diffs,
+`strip_markup` → `policy::effective_expire_timeout` → enqueue → emit
+`NotificationClosed`. Icon lookup then runs on the blocking pool and updates
+only the matching queue revision. Render: window ticker reads `snapshot`, `feed` diffs,
 `geometry` places, `popup` draws. Dismiss: `window` →
 `commands::request_dismissal` → `queue.request_close` → `host` drains and
 emits.
@@ -63,6 +67,7 @@ emits.
 | Entity, id, close reason | `domain/` |
 | D-Bus validation, markup | `infrastructure/dbus/` |
 | Icon lookup | `infrastructure/icons/` |
+| Hyprland window focus | `infrastructure/activation.rs` |
 | Layout, geometry, input region | `presentation/shell/geometry.rs` |
 | Widget, card, animation, theme | `presentation/shell/`, `presentation/theme.rs` |
 
@@ -72,5 +77,6 @@ Integration tests use only the public API (`nobody::...`):
 
 - `tests/queue_invariants.rs` — queue caps at `KEEP=12`, ghost `replaces_id`
   never squats an arbitrary id.
-- `tests/dbus_contract.rs` — capabilities announce only `body` +
-  `icon-static`; closing an unknown id is silent.
+- `tests/dbus_contract.rs` — capabilities announce `body`, `actions`,
+  `icon-static`, `x-dunst-stack-tag`, `x-canonical-private-synchronous`
+  and `value`; closing an unknown id is silent.

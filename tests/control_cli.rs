@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use zbus::zvariant::{OwnedValue, Value};
 
 use nobody::application::{cli, commands, config::Config};
-use nobody::domain::close::{CloseReason, CloseRequest};
+use nobody::domain::close::CloseReason;
 use nobody::domain::notice::Notice;
 use nobody::domain::queue::Queue;
 use nobody::infrastructure::dbus::control::{CONTROL_PATH, ControlService};
@@ -27,6 +28,82 @@ enum LifecycleEvent {
 struct IsolatedBus {
     address: String,
     daemon: Child,
+}
+
+struct SessionBusEnvGuard(Option<std::ffi::OsString>);
+
+impl SessionBusEnvGuard {
+    fn set(address: &str) -> Self {
+        let previous = std::env::var_os("DBUS_SESSION_BUS_ADDRESS");
+        unsafe {
+            std::env::set_var("DBUS_SESSION_BUS_ADDRESS", address);
+        }
+        Self(previous)
+    }
+}
+
+impl Drop for SessionBusEnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.0.take() {
+                Some(value) => std::env::set_var("DBUS_SESSION_BUS_ADDRESS", value),
+                None => std::env::remove_var("DBUS_SESSION_BUS_ADDRESS"),
+            }
+        }
+    }
+}
+
+fn session_bus_env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct SlowMpris {
+    ready: mpsc::Sender<()>,
+}
+
+#[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
+impl SlowMpris {
+    #[zbus(property)]
+    async fn metadata(&self) -> zbus::fdo::Result<OwnedValue> {
+        self.ready.send(()).expect("slow MPRIS readiness receiver");
+        std::thread::sleep(Duration::from_secs(1));
+        Err(zbus::fdo::Error::Failed("slow fake MPRIS lookup".into()))
+    }
+}
+
+struct HeldMpris {
+    ready: mpsc::Sender<()>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+#[zbus::interface(name = "org.mpris.MediaPlayer2.Player")]
+impl HeldMpris {
+    #[zbus(property)]
+    async fn metadata(&self) -> zbus::fdo::Result<OwnedValue> {
+        self.ready.send(()).expect("held MPRIS readiness receiver");
+        let release = self.release.clone();
+        blocking::unblock(move || {
+            let (released, wake) = &*release;
+            let released = released.lock().unwrap_or_else(|error| error.into_inner());
+            drop(
+                wake.wait_while(released, |released| !*released)
+                    .unwrap_or_else(|error| error.into_inner()),
+            );
+        })
+        .await;
+        Err(zbus::fdo::Error::Failed("released fake MPRIS lookup".into()))
+    }
+}
+
+struct ReleaseMpris(Arc<(Mutex<bool>, Condvar)>);
+
+impl Drop for ReleaseMpris {
+    fn drop(&mut self) {
+        let (released, wake) = &*self.0;
+        *released.lock().unwrap_or_else(|error| error.into_inner()) = true;
+        wake.notify_all();
+    }
 }
 
 impl IsolatedBus {
@@ -80,6 +157,7 @@ fn notice(app: &str) -> Notice {
     Notice {
         id: 0,
         app: app.into(),
+        desktop_entry: None,
         summary: "summary".into(),
         body: String::new(),
         icon: None,
@@ -215,6 +293,7 @@ fn control_service_drives_queue_without_bus() {
         Notice {
             id: 0,
             app: "TestApp".into(),
+            desktop_entry: None,
             summary: "summary".into(),
             body: "body".into(),
             icon: None,
@@ -274,6 +353,7 @@ fn control_service_dismiss_all_queues_user_closures_and_keeps_history() {
         Notice {
             id: 0,
             app: "A".into(),
+            desktop_entry: None,
             summary: "a".into(),
             body: String::new(),
             icon: None,
@@ -289,6 +369,7 @@ fn control_service_dismiss_all_queues_user_closures_and_keeps_history() {
         Notice {
             id: 0,
             app: "B".into(),
+            desktop_entry: None,
             summary: "b".into(),
             body: String::new(),
             icon: None,
@@ -305,11 +386,12 @@ fn control_service_dismiss_all_queues_user_closures_and_keeps_history() {
 
     svc.dismiss_all();
 
-    assert_eq!(
-        queue.drain_close_requests(),
-        ids.into_iter()
-            .map(|id| CloseRequest { id, reason: CloseReason::DismissedByUser })
-            .collect::<Vec<_>>()
+    let requests = queue.drain_close_requests();
+    assert_eq!(requests.iter().map(|request| request.id).collect::<Vec<_>>(), ids);
+    assert!(
+        requests.iter().all(|request| {
+            request.revision > 0 && request.reason == CloseReason::DismissedByUser
+        })
     );
     assert_eq!(queue.snapshot().len(), 2);
     assert_eq!(queue.history_snapshot(), history);
@@ -463,6 +545,174 @@ fn notify_tag_replacement_runs_on_an_isolated_dbus_and_keeps_one_history_entry()
 }
 
 #[test]
+fn close_notification_is_not_blocked_by_slow_spotify_lookup() {
+    let _env_lock = session_bus_env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let bus = IsolatedBus::start();
+    let _env = SessionBusEnvGuard::set(&bus.address);
+    let queue = Queue::new();
+    let _server = server(&bus, queue.clone());
+    let marker = queue.push_with_outcome(0, notice("Marker")).id;
+
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let _mpris = zbus::block_on(
+        zbus::connection::Builder::address(bus.address.as_str())
+            .expect("isolated bus address")
+            .name("org.mpris.MediaPlayer2.spotify")
+            .expect("MPRIS service name")
+            .serve_at("/org/mpris/MediaPlayer2", SlowMpris { ready: ready_tx })
+            .expect("MPRIS player interface")
+            .build(),
+    )
+    .expect("build fake MPRIS service");
+
+    let notify_address = bus.address.clone();
+    let (notify_tx, notify_rx) = mpsc::channel();
+    let notify_handle = std::thread::spawn(move || {
+        let connection = zbus::blocking::connection::Builder::address(notify_address.as_str())
+            .expect("isolated bus address")
+            .method_timeout(Duration::from_secs(5))
+            .build()
+            .expect("connect notification client");
+        let proxy = zbus::blocking::Proxy::new(
+            &connection,
+            SERVICE,
+            NOTIFICATION_PATH,
+            "org.freedesktop.Notifications",
+        )
+        .expect("notification proxy");
+        let result: zbus::Result<u32> = proxy.call(
+            "Notify",
+            &(
+                "Spotify",
+                0_u32,
+                "",
+                "slow lookup",
+                "body",
+                Vec::<String>::new(),
+                HashMap::<String, OwnedValue>::new(),
+                0_i32,
+            ),
+        );
+        let _ = notify_tx.send(result);
+    });
+    ready_rx.recv_timeout(Duration::from_secs(1)).expect("slow MPRIS lookup started");
+
+    let max_close_wait = Duration::from_millis(250);
+    let close_client = zbus::blocking::connection::Builder::address(bus.address.as_str())
+        .expect("isolated bus address")
+        .method_timeout(max_close_wait)
+        .build()
+        .expect("connect close client");
+    let close_proxy = zbus::blocking::Proxy::new(
+        &close_client,
+        SERVICE,
+        NOTIFICATION_PATH,
+        "org.freedesktop.Notifications",
+    )
+    .expect("notification proxy");
+    let started = std::time::Instant::now();
+    let close_result: zbus::Result<()> = close_proxy.call("CloseNotification", &marker);
+    let close_elapsed = started.elapsed();
+    let notify_result =
+        notify_rx.recv_timeout(Duration::from_secs(10)).expect("Notify thread returned");
+    notify_handle.join().expect("Notify thread");
+
+    assert!(
+        close_result.is_ok(),
+        "CloseNotification blocked behind slow MPRIS lookup for {close_elapsed:?}: {close_result:?}"
+    );
+    assert!(
+        close_elapsed < max_close_wait,
+        "CloseNotification took {close_elapsed:?} while the lookup was delayed"
+    );
+    assert!(notify_result.is_ok(), "Spotify Notify failed: {notify_result:?}");
+    assert!(!queue.snapshot().iter().any(|notice| notice.id == marker));
+}
+
+#[test]
+fn icon_lookup_resumes_after_all_workers_were_busy() {
+    let _env_lock = session_bus_env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let bus = IsolatedBus::start();
+    let _env = SessionBusEnvGuard::set(&bus.address);
+    let queue = Queue::new();
+    let _server = server(&bus, queue.clone());
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let _mpris = zbus::block_on(
+        zbus::connection::Builder::address(bus.address.as_str())
+            .expect("isolated bus address")
+            .name("org.mpris.MediaPlayer2.spotify")
+            .expect("MPRIS service name")
+            .serve_at(
+                "/org/mpris/MediaPlayer2",
+                HeldMpris { ready: ready_tx, release: release.clone() },
+            )
+            .expect("MPRIS player interface")
+            .build(),
+    )
+    .expect("build held MPRIS service");
+    let release = ReleaseMpris(release);
+    let connection = client(&bus);
+    let proxy = zbus::blocking::Proxy::new(
+        &connection,
+        SERVICE,
+        NOTIFICATION_PATH,
+        "org.freedesktop.Notifications",
+    )
+    .expect("notification proxy");
+
+    for _ in 0..nobody::domain::queue::KEEP {
+        let _: u32 = proxy
+            .call(
+                "Notify",
+                &(
+                    "Spotify",
+                    0_u32,
+                    "",
+                    "held lookup",
+                    "",
+                    Vec::<String>::new(),
+                    HashMap::<String, OwnedValue>::new(),
+                    0_i32,
+                ),
+            )
+            .expect("Notify must respond while lookup is held");
+        ready_rx.recv_timeout(Duration::from_secs(1)).expect("icon worker reached held lookup");
+    }
+
+    let icon = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/nobody-badge.png");
+    let id: u32 = proxy
+        .call(
+            "Notify",
+            &(
+                "Queued icon",
+                0_u32,
+                icon,
+                "queued lookup",
+                "",
+                Vec::<String>::new(),
+                HashMap::<String, OwnedValue>::new(),
+                0_i32,
+            ),
+        )
+        .expect("Notify must respond while all icon workers are busy");
+    assert!(queue.snapshot().iter().find(|notice| notice.id == id).unwrap().icon.is_none());
+
+    drop(release);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while queue.snapshot().iter().find(|notice| notice.id == id).unwrap().icon.is_none() {
+        assert!(std::time::Instant::now() < deadline, "queued icon lookup never resumed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let expected = Some(std::path::PathBuf::from(icon));
+    assert_eq!(queue.snapshot().iter().find(|notice| notice.id == id).unwrap().icon, expected);
+    assert_eq!(
+        queue.history_snapshot().iter().find(|entry| entry.notice.id == id).unwrap().notice.icon,
+        expected
+    );
+}
+
+#[test]
 fn default_action_emits_once_before_close_and_keeps_history() {
     let bus = IsolatedBus::start();
     let queue = Queue::new();
@@ -485,11 +735,18 @@ fn default_action_emits_once_before_close_and_keeps_history() {
                 "summary",
                 "body",
                 vec!["default".to_string(), "Abrir".to_string()],
-                HashMap::<String, OwnedValue>::new(),
+                HashMap::from([(
+                    "desktop-entry".to_string(),
+                    string_hint("org.example.NotificationSource"),
+                )]),
                 0_i32,
             ),
         )
         .expect("Notify");
+    assert_eq!(
+        queue.snapshot()[0].desktop_entry.as_deref(),
+        Some("org.example.NotificationSource")
+    );
     let caps: Vec<String> = notifications.call("GetCapabilities", &()).unwrap();
     assert!(caps.iter().any(|c| c == "body"));
     assert!(caps.iter().any(|c| c == "actions"));
@@ -589,7 +846,6 @@ fn actions_skip_removed_expired_replaced_and_dismissed_notices() {
     queue.push_with_outcome(ids[2], notice("Replacement without action"));
     commands::request_dismissal(&queue, ids[3]);
     let history = queue.history_snapshot();
-    // The expiration test uses the same real monotonic clock as the host.
     std::thread::sleep(Duration::from_millis(2));
 
     zbus::block_on(host::flush_lifecycle_events(&server));
@@ -633,13 +889,15 @@ fn lifecycle_waits_for_interface_mutation_and_revalidates_pending_action() {
         server.object_server().interface::<_, NotificationDaemon>(NOTIFICATION_PATH),
     )
     .expect("notification interface");
-    // Hold the same writer guard used by Notify and CloseNotification.
     let daemon = zbus::block_on(interface.get_mut());
     let mut flush = Box::pin(host::flush_lifecycle_events(&server));
     let mut context = Context::from_waker(Waker::noop());
     assert!(flush.as_mut().poll(&mut context).is_pending());
     let pending = queue.drain_action_requests();
-    assert_eq!(pending, vec![nobody::domain::action::ActionRequest { id, key: "default".into() }]);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, id);
+    assert!(pending[0].revision > 0);
+    assert_eq!(pending[0].key, "default");
     queue.request_action(id, "default");
     daemon.queue.push_with_outcome(id, notice("Replacement without action"));
     drop(daemon);
@@ -828,12 +1086,12 @@ fn cli_binary_dismisses_on_an_isolated_bus_and_rejects_bad_syntax() {
     assert_eq!(success.status.code(), Some(0));
     assert!(success.stdout.is_empty());
     assert!(success.stderr.is_empty());
-    assert_eq!(
-        queue.drain_close_requests(),
-        vec![
-            CloseRequest { id: first, reason: CloseReason::DismissedByUser },
-            CloseRequest { id: second, reason: CloseReason::DismissedByUser },
-        ]
+    let requests = queue.drain_close_requests();
+    assert_eq!(requests.iter().map(|request| request.id).collect::<Vec<_>>(), vec![first, second]);
+    assert!(
+        requests.iter().all(|request| {
+            request.revision > 0 && request.reason == CloseReason::DismissedByUser
+        })
     );
 
     for bad_args in [
@@ -897,4 +1155,209 @@ fn cli_binary_execution_contract() {
         assert!(!stderr.is_empty(), "stderr should contain error message");
         assert!(output.stdout.is_empty(), "stdout must be empty without partial JSON on failure");
     }
+}
+
+#[test]
+fn host_startup_surfaces_name_collision() {
+    let _env_lock = session_bus_env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let bus = IsolatedBus::start();
+    let _env = SessionBusEnvGuard::set(&bus.address);
+    let first = zbus::block_on(
+        zbus::connection::Builder::address(bus.address.as_str())
+            .expect("isolated bus address")
+            .name(SERVICE)
+            .expect("notification service name")
+            .allow_name_replacements(true)
+            .build(),
+    )
+    .expect("first owner must allow replacement");
+
+    let collision = zbus::block_on(host::serve(Queue::new(), Config::default()))
+        .expect_err("a second host must reject the occupied notification name");
+
+    assert!(matches!(collision, zbus::Error::NameTaken));
+    assert!(
+        !host::is_retryable(&collision),
+        "an occupied singleton name must stop instead of retrying forever"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_nobody"))
+        .env("DBUS_SESSION_BUS_ADDRESS", &bus.address)
+        .env("WAYLAND_DISPLAY", "nobody-wayland-display-does-not-exist")
+        .output()
+        .expect("run daemon while the notification name is occupied");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("outro daemon ocupa"), "unexpected stderr: {stderr}");
+    assert!(!stderr.contains("LayerShell"), "UI started before D-Bus failed: {stderr}");
+    drop(first);
+}
+
+#[test]
+fn host_startup_surfaces_session_bus_failure() {
+    let _env_lock = session_bus_env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let missing_socket = format!(
+        "unix:path={}/nobody-session-bus-does-not-exist-{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    let _env = SessionBusEnvGuard::set(&missing_socket);
+
+    let failure = zbus::block_on(host::serve(Queue::new(), Config::default()))
+        .expect_err("missing session bus must fail");
+
+    assert!(host::is_retryable(&failure), "a lost session bus may return after startup");
+}
+
+#[test]
+fn daemon_exits_before_opening_the_ui_when_startup_has_no_bus() {
+    let missing_socket = format!(
+        "unix:path={}/nobody-daemon-startup-bus-does-not-exist-{}",
+        std::env::temp_dir().display(),
+        std::process::id()
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_nobody"))
+        .env("DBUS_SESSION_BUS_ADDRESS", missing_socket)
+        .env("WAYLAND_DISPLAY", "nobody-wayland-display-does-not-exist")
+        .output()
+        .expect("run daemon without a session bus");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("session bus"), "unexpected stderr: {stderr}");
+    assert!(!stderr.contains("LayerShell"), "UI started before D-Bus failed: {stderr}");
+}
+
+#[test]
+fn host_can_register_again_after_the_session_bus_is_replaced() {
+    let _env_lock = session_bus_env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let bus = IsolatedBus::start();
+    let _env = SessionBusEnvGuard::set(&bus.address);
+    let queue = Queue::new();
+    let connection = zbus::block_on(host::serve(queue.clone(), Config::default()))
+        .expect("initial host registration");
+
+    drop(bus);
+    for _ in 0..500 {
+        if connection.is_closed() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(connection.is_closed(), "connection must observe the stopped bus");
+
+    let replacement = IsolatedBus::start();
+    unsafe {
+        std::env::set_var("DBUS_SESSION_BUS_ADDRESS", &replacement.address);
+    }
+    let reconnected = zbus::block_on(host::serve(queue.clone(), Config::default()))
+        .expect("host must register on the replacement bus");
+    assert!(!reconnected.is_closed());
+
+    let client = client(&replacement);
+    let notifications = zbus::blocking::Proxy::new(
+        &client,
+        SERVICE,
+        NOTIFICATION_PATH,
+        "org.freedesktop.Notifications",
+    )
+    .expect("notification proxy after reconnect");
+    let id: u32 = notifications
+        .call(
+            "Notify",
+            &(
+                "Reconnected",
+                0_u32,
+                "",
+                "summary",
+                "",
+                Vec::<String>::new(),
+                HashMap::<String, OwnedValue>::new(),
+                0_i32,
+            ),
+        )
+        .expect("Notify after reconnect");
+    assert!(queue.snapshot().iter().any(|notice| notice.id == id));
+
+    let control = zbus::blocking::Proxy::new(&client, SERVICE, CONTROL_PATH, "com.nobody.Control")
+        .expect("control proxy after reconnect");
+    assert_eq!(
+        control
+            .call::<_, _, (bool, bool, bool)>("DndStatus", &())
+            .expect("control after reconnect"),
+        (false, false, false)
+    );
+}
+
+#[test]
+fn pending_action_does_not_target_a_same_key_replacement() {
+    let bus = IsolatedBus::start();
+    let queue = Queue::new();
+    let server = server(&bus, queue.clone());
+    let client = client(&bus);
+
+    let mut first = notice("A");
+    first.actions = vec!["settings".into(), "Configure A".into()];
+    let id = queue.push_with_outcome(0, first).id;
+    commands::request_action(&queue, id, "settings");
+
+    let mut replacement = notice("B");
+    replacement.actions = vec!["settings".into(), "Configure B".into()];
+    queue.push_with_outcome(id, replacement);
+    let marker = queue.push_with_outcome(0, notice("Marker")).id;
+    let (events, ready, listener) = lifecycle_events(&client, marker);
+    ready.recv_timeout(Duration::from_secs(1)).expect("signal listener startup");
+
+    zbus::block_on(host::flush_lifecycle_events(&server));
+    commands::request_dismissal(&queue, marker);
+    zbus::block_on(host::flush_lifecycle_events(&server));
+
+    let captured = events.recv_timeout(Duration::from_secs(1)).expect("lifecycle signals");
+    listener.join().expect("signal listener");
+    assert_eq!(
+        captured,
+        vec![LifecycleEvent::Closed(marker, CloseReason::DismissedByUser.code())],
+        "an action queued for A must not emit or close the same-ID replacement B"
+    );
+    let active = queue.snapshot();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, id);
+    assert_eq!(active[0].app, "B");
+}
+
+#[test]
+fn pending_user_close_does_not_close_a_same_id_replacement() {
+    let bus = IsolatedBus::start();
+    let queue = Queue::new();
+    let server = server(&bus, queue.clone());
+    let client = client(&bus);
+
+    let mut first = notice("Mixer");
+    first.summary = "A".into();
+    first.stack_tag = Some("volume".into());
+    let id = queue.push_with_outcome(0, first).id;
+    commands::request_dismissal(&queue, id);
+    let mut replacement = notice("Mixer");
+    replacement.summary = "B".into();
+    replacement.stack_tag = Some("volume".into());
+    assert_eq!(queue.push_with_outcome(0, replacement).id, id);
+    let marker = queue.push_with_outcome(0, notice("Marker")).id;
+    let (events, ready, listener) = lifecycle_events(&client, marker);
+    ready.recv_timeout(Duration::from_secs(1)).expect("signal listener startup");
+
+    zbus::block_on(host::flush_lifecycle_events(&server));
+    commands::request_dismissal(&queue, marker);
+    zbus::block_on(host::flush_lifecycle_events(&server));
+
+    let captured = events.recv_timeout(Duration::from_secs(1)).expect("lifecycle signals");
+    listener.join().expect("signal listener");
+    assert_eq!(
+        captured,
+        vec![LifecycleEvent::Closed(marker, CloseReason::DismissedByUser.code())],
+        "a close queued for A must not close the same-ID replacement B"
+    );
+    let active = queue.snapshot();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, id);
+    assert_eq!(active[0].summary, "B");
 }

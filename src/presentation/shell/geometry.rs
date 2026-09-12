@@ -185,7 +185,6 @@ pub fn sync_window_geometry(
         *last_h = Some(total_h);
     }
 
-    // Positions can change without the window height or number of decks changing.
     window.set_input_region(Some(input_regions));
 }
 
@@ -197,6 +196,7 @@ mod tests {
         Notice {
             id,
             app: app.into(),
+            desktop_entry: None,
             summary: "s".into(),
             body: "".into(),
             icon: None,

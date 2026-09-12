@@ -5,6 +5,7 @@ fn mk(app: &str) -> Notice {
     Notice {
         id: 0,
         app: app.into(),
+        desktop_entry: None,
         summary: "s".into(),
         body: "".into(),
         icon: None,

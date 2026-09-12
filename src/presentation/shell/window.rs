@@ -150,7 +150,6 @@ impl NotificationStack {
                         path.line_to(origin + point(r * 2., h));
                         path.curve_to(origin + point(r, h - r), origin + point(r, h));
                         path.line_to(origin + point(r, r));
-                        // Concave corner joins the panel to the bar above it.
                         path.curve_to(origin, origin + point(r, px(0.)));
                         path.close();
                         window.paint_path(
@@ -354,30 +353,35 @@ impl NotificationStack {
                                     cx.notify();
                                 }
                                 center::SearchKeyAction::Paste => {
-                                    let mut changed = center::drop_marked(
-                                        &mut stack.center_query,
-                                        &mut stack.center_marked,
-                                    );
-                                    if let Some(text) =
+                                    let changed = if let Some(text) =
                                         cx.read_from_clipboard().and_then(|item| item.text())
                                     {
-                                        let text = text.replace('\n', " ");
-                                        if !text.is_empty() {
-                                            stack.center_query.push_str(&text);
-                                            changed = true;
+                                        let text = center::sanitize_ime_text(&text);
+                                        let changed = center::append_query_with_marked(
+                                            &mut stack.center_query,
+                                            &mut stack.center_marked,
+                                            &text,
+                                        );
+                                        if changed && !text.is_empty() {
                                             cx.stop_propagation();
                                         }
-                                    }
+                                        changed
+                                    } else {
+                                        center::drop_marked(
+                                            &mut stack.center_query,
+                                            &mut stack.center_marked,
+                                        )
+                                    };
                                     if changed {
                                         cx.notify();
                                     }
                                 }
-                                center::SearchKeyAction::InsertChar(_) => {
-                                    center::drop_marked(
+                                center::SearchKeyAction::InsertChar(text) => {
+                                    if center::append_query_with_marked(
                                         &mut stack.center_query,
                                         &mut stack.center_marked,
-                                    );
-                                    if center::apply_search_edit(&mut stack.center_query, &action) {
+                                        &text,
+                                    ) {
                                         cx.stop_propagation();
                                         cx.notify();
                                     }
@@ -445,7 +449,7 @@ impl NotificationStack {
                         .py(px(6.))
                         .rounded(px(10.))
                         .bg(fade(INK, 0.78))
-                        .child(popup::badge(n.icon.as_ref(), &n.app))
+                        .child(popup::badge(n.icon.as_ref(), &n.app, cx))
                         .child(
                             div()
                                 .flex_1()
@@ -834,7 +838,6 @@ impl gpui::Render for NotificationStack {
         geometry::sync_window_geometry(window, &mut self.last_window_h, &input_regions, total_h);
 
         if !shown.is_empty() && !self.popup_focus.contains_focused(window, cx) {
-            // Recover focus after a focused card disappears or the central closes.
             window.focus(&self.popup_focus, cx);
         }
 
@@ -941,14 +944,13 @@ impl gpui::Render for NotificationStack {
                             })
                             .read(cx)
                             .clone();
-                        if deck.collapsed && m == 0 && card_focus.is_focused(window) {
-                            // Teclado não tem hover: focar o card visível expande o
-                            // deck para que Tab alcance os irmãos ocultos.
-                            // ponytail: sem auto-recolher no blur para não roubar foco.
-                            if self.expanded.as_deref() != Some(deck.app.as_str()) {
-                                self.expanded = Some(deck.app.clone());
-                                cx.notify();
-                            }
+                        if deck.collapsed
+                            && m == 0
+                            && card_focus.is_focused(window)
+                            && self.expanded.as_deref() != Some(deck.app.as_str())
+                        {
+                            self.expanded = Some(deck.app.clone());
+                            cx.notify();
                         }
                         let mut card = div()
                             .id(("notif", notice_id))
@@ -994,7 +996,7 @@ impl gpui::Render for NotificationStack {
                             .items_center()
                             .gap(px(6.))
                             .px(px(10.))
-                            .child(popup::badge(notice.icon.as_ref(), &notice.app))
+                            .child(popup::badge(notice.icon.as_ref(), &notice.app, cx))
                             .child(popup::card_content(notice));
                         let pairs = notice.actions.as_chunks::<2>().0;
                         if !pairs.is_empty() {
@@ -1130,7 +1132,7 @@ impl gpui::Render for NotificationStack {
                             .items_center()
                             .gap(px(6.))
                             .px(px(10.))
-                            .child(popup::badge(ex.notice.icon.as_ref(), &ex.notice.app))
+                            .child(popup::badge(ex.notice.icon.as_ref(), &ex.notice.app, cx))
                             .child(popup::card_content(&ex.notice))
                     })
                     .collect::<Vec<_>>()

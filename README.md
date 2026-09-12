@@ -48,16 +48,25 @@ usual GPUI/Linux packages (`libwayland`, `libxkbcommon`, Vulkan).
 
 ## Use
 
-- Click, Enter, Space or Escape dismisses a notification.
+- Click or Escape dismisses a notification. Enter and Space dismiss it too, unless
+  an action button is focused, in which case they activate that action.
 - Keeps 12 notifications, renders the 5 most recent.
 - Timeout: `-1` means server default (5s), `0` never expires; critical
   notifications never auto-expire.
-- Notificações ativas que anunciam a chave `default` exibem o botão `Abrir`;
-  Enter e Space também o ativam. A ação emite `ActionInvoked` e fecha com
-  razão 2, preservando o histórico. O daemon não anuncia a capability
-  `actions`, então alguns clientes podem não enviar ações. O daemon não abre
-  URLs ou aplicativos: o cliente decide o que fazer com o sinal, e o foco
-  depende do token de ativação e do compositor Wayland.
+- O daemon anuncia as capabilities `body` e `actions`. Cada par
+  chave/rótulo recebido (até 10 ações, 20 itens chave/rótulo; chaves vazias
+  ou repetidas são ignoradas e rótulos são cortados em 64 caracteres) gera um
+  botão no popup ativo: `default` mostra
+  `Abrir`, as demais chaves mostram o rótulo recebido (ou `Ação` se vazio).
+  Clique, Enter ou Space no botão ativa a ação;
+  a chave original é devolvida opaca via `ActionInvoked` e o popup fecha com
+  razão 2, preservando o histórico. Chaves desconhecidas, itens expirados,
+  removidos ou com fechamento pendente não geram ação. A central é histórico
+  de leitura: não oferece ações nem reproduz itens antigos. O daemon nunca
+  executa a chave como comando, URL ou argumento de shell: o cliente decide
+  a navegação. No Hyprland, a ação `default` também foca a janela mapeada mais
+  recente do `desktop-entry` (ou do nome do aplicativo), mudando de workspace
+  quando necessário. Outros compositores ainda podem exigir token de ativação.
 - Notify aceita `x-dunst-stack-tag` e `x-canonical-private-synchronous` como
   tags string de 1 a 128 caracteres; a primeira tem precedência quando ambas
   são válidas. Na mesma aplicação, uma tag ativa substitui a notificação
@@ -115,9 +124,34 @@ nobody history --json
   preserva o histórico, o estado da central e Não Perturbe.
 - Limitação desta entrega: histórico apenas em memória — sem banco ou
   persistência. A exportação JSON mostra somente os snapshots atuais e do
-  histórico mantido durante a sessão; não há menu de ações nomeadas nem
-  abertura automática de aplicativos. Reiniciar o daemon começa com histórico
-  vazio.
+  histórico mantido durante a sessão; não há abertura automática de
+  aplicativos. Reiniciar o daemon começa com histórico vazio.
+
+### Brave / YouTube
+
+O Nobody recebe o que o navegador entrega ao sistema via
+`org.freedesktop.Notifications`. Ele não lê o sino interno do YouTube, não
+recupera alertas antigos da conta e não substitui as permissões/push do
+navegador. O Chromium usa o backend freedesktop quando o serviço anuncia
+`body` e `actions`; uma instalação isolada (Flatpak/Snap) pode usar o
+portal em vez do bus direto.
+
+Para validar a integração:
+
+1. Confira que `GetCapabilities` anuncia `body` e `actions`.
+2. No Brave, permita notificações e use a [página oficial de teste
+   push](https://support.brave.com/hc/en-us/articles/360058972091-Push-Notification-Test).
+   `notify-send` sozinho não valida o navegador.
+3. No YouTube, ative a opção de receber notificações neste navegador e as
+   preferências da conta/canais conforme a [ajuda
+   oficial](https://support.google.com/youtube/answer/9334950?hl=en); aguarde
+   uma notificação legítima. O teste push genérico não prova que a conta
+   está configurada.
+4. Se nada chegar, verifique as permissões do site e a opção de serviços
+   Google para push na versão instalada. O Brave pode precisar reiniciar
+   para renegociar capabilities; salve seu trabalho antes.
+5. Clicar em Abrir devolve a chave ao navegador via `ActionInvoked`; no
+   Hyprland, o Nobody também segue para o workspace da janela correspondente.
 
 ### Waybar
 
@@ -160,13 +194,14 @@ Debug:
 ## Behavior
 
 - `Notify`, `CloseNotification`, `GetCapabilities`, `GetServerInformation`;
-  emits `NotificationClosed`.
+  emits `NotificationClosed` and `ActionInvoked`.
 - `replaces_id` replaces atomically.
 - `x-dunst-stack-tag` e `x-canonical-private-synchronous` substituem uma
   notificação ativa da mesma aplicação quando `replaces_id` é zero; tags
   inválidas são ignoradas e substituições explícitas por ID têm precedência.
 - Icon path/name plus `desktop-entry` lookup scoped to known locations;
-  markup is stripped. No named action menu, `image-data` or persistence.
+  markup is stripped. No `image-data`, persistence, body-markup, inline
+  replies or activation tokens; cross-workspace focus uses Hyprland IPC.
 
 ## Architecture
 

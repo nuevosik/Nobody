@@ -1,5 +1,19 @@
 use std::ops::Range;
 
+pub const MAX_QUERY_LEN: usize = 4096;
+
+fn fits(query: &str, removed: usize, added: usize) -> bool {
+    query.len() - removed + added <= MAX_QUERY_LEN
+}
+
+pub fn append_query(query: &mut String, text: &str) -> bool {
+    if text.is_empty() || !fits(query, 0, text.len()) {
+        return false;
+    }
+    query.push_str(text);
+    true
+}
+
 pub fn dnd_button_label(manual: bool) -> &'static str {
     if manual { "Não Perturbe: on" } else { "Não Perturbe: off" }
 }
@@ -61,10 +75,7 @@ pub fn classify_search_key(
 
 pub fn apply_search_edit(query: &mut String, action: &SearchKeyAction) -> bool {
     match action {
-        SearchKeyAction::InsertChar(text) => {
-            query.push_str(text);
-            true
-        }
+        SearchKeyAction::InsertChar(text) => append_query(query, text),
         SearchKeyAction::Backspace => query.pop().is_some(),
         _ => false,
     }
@@ -140,7 +151,11 @@ pub fn ime_replace(
         Some(range) => utf8_range_for_utf16(query, range),
         None => marked.clone().unwrap_or(query.len()..query.len()),
     };
-    query.replace_range(range, &sanitize_ime_text(text));
+    let inserted = sanitize_ime_text(text);
+    if !fits(query, range.len(), inserted.len()) {
+        return;
+    }
+    query.replace_range(range, &inserted);
     *marked = None;
 }
 
@@ -155,6 +170,9 @@ pub fn ime_mark(
         None => marked.clone().unwrap_or(query.len()..query.len()),
     };
     let inserted = sanitize_ime_text(text);
+    if !fits(query, range.len(), inserted.len()) {
+        return;
+    }
     let start = range.start;
     query.replace_range(range, &inserted);
     *marked = Some(start..start + inserted.len());
@@ -174,6 +192,23 @@ pub fn drop_marked(query: &mut String, marked: &mut Option<Range<usize>>) -> boo
         }
         None => false,
     }
+}
+
+pub fn append_query_with_marked(
+    query: &mut String,
+    marked: &mut Option<Range<usize>>,
+    text: &str,
+) -> bool {
+    let removed = marked.as_ref().map_or(0, |range| {
+        let end = floor_char_boundary(query, range.end);
+        let start = floor_char_boundary(query, range.start).min(end);
+        end - start
+    });
+    if !fits(query, removed, text.len()) {
+        return false;
+    }
+    let changed = drop_marked(query, marked);
+    append_query(query, text) || changed
 }
 
 #[cfg(test)]
@@ -288,6 +323,37 @@ mod tests {
         let mut spaced = String::from("a\nb");
         ime_replace(&mut spaced, &mut None, None, "x\ny");
         assert_eq!(spaced, "a\nbx y");
+    }
+
+    #[test]
+    fn query_cap_rejects_oversized_input() {
+        let mut query = "x".repeat(MAX_QUERY_LEN - 1);
+        assert!(append_query(&mut query, "y"));
+        assert_eq!(query.len(), MAX_QUERY_LEN);
+        assert!(!append_query(&mut query, "z"));
+        assert_eq!(query.len(), MAX_QUERY_LEN);
+        assert!(!append_query(&mut query, ""));
+        assert!(!apply_search_edit(&mut query, &SearchKeyAction::InsertChar("z".into())));
+        let mut marked = None;
+        ime_mark(&mut query, &mut marked, None, "z");
+        assert_eq!(query.len(), MAX_QUERY_LEN);
+        assert!(marked.is_none());
+    }
+
+    #[test]
+    fn marked_append_rejects_atomically_and_replaces_at_limit() {
+        let mut query = "x".repeat(MAX_QUERY_LEN - 1);
+        let mut marked = None;
+        ime_mark(&mut query, &mut marked, None, "a");
+        let original_query = query.clone();
+        let original_marked = marked.clone();
+        assert!(!append_query_with_marked(&mut query, &mut marked, "bc"));
+        assert_eq!(query, original_query);
+        assert_eq!(marked, original_marked);
+        assert!(append_query_with_marked(&mut query, &mut marked, "z"));
+        assert_eq!(query.len(), MAX_QUERY_LEN);
+        assert!(query.ends_with('z'));
+        assert!(marked.is_none());
     }
 
     #[test]

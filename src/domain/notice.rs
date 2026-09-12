@@ -10,6 +10,7 @@ pub fn is_valid_stack_tag(tag: &str) -> bool {
 pub struct Notice {
     pub id: u32,
     pub app: String,
+    pub desktop_entry: Option<String>,
     pub summary: String,
     pub body: String,
     pub icon: Option<PathBuf>,
@@ -42,6 +43,7 @@ mod tests {
         Notice {
             id: 1,
             app: "A".into(),
+            desktop_entry: None,
             summary: "s".into(),
             body: "".into(),
             icon: None,
