@@ -24,6 +24,7 @@ pub struct Queue {
     next_revision: Arc<AtomicU64>,
     manual_quiet: Arc<AtomicBool>,
     center_open: Arc<AtomicBool>,
+    changed: Arc<event_listener::Event>,
 }
 
 impl Default for Queue {
@@ -46,11 +47,22 @@ impl Queue {
             next_revision: Arc::new(AtomicU64::new(1)),
             manual_quiet: Arc::new(AtomicBool::new(false)),
             center_open: Arc::new(AtomicBool::new(false)),
+            changed: Arc::new(event_listener::Event::new()),
         }
     }
 
+    pub fn on_change(&self) -> event_listener::EventListener {
+        self.changed.listen()
+    }
+
+    fn notify_changed(&self) {
+        self.changed.notify(usize::MAX);
+    }
+
     pub fn set_quiet(&self, quiet: bool) {
-        self.quiet.store(quiet, Ordering::Relaxed);
+        if self.quiet.swap(quiet, Ordering::Relaxed) != quiet {
+            self.notify_changed();
+        }
         if quiet {
             self.set_center_open(false);
         }
@@ -61,11 +73,15 @@ impl Queue {
     }
 
     pub fn set_manual_quiet(&self, quiet: bool) {
-        self.manual_quiet.store(quiet, Ordering::Relaxed);
+        if self.manual_quiet.swap(quiet, Ordering::Relaxed) != quiet {
+            self.notify_changed();
+        }
     }
 
     pub fn toggle_manual_quiet(&self) -> bool {
-        self.manual_quiet.fetch_xor(true, Ordering::Relaxed) ^ true
+        let next = self.manual_quiet.fetch_xor(true, Ordering::Relaxed) ^ true;
+        self.notify_changed();
+        next
     }
 
     pub fn is_manual_quiet(&self) -> bool {
@@ -77,7 +93,10 @@ impl Queue {
     }
 
     pub fn set_center_open(&self, open: bool) {
-        self.center_open.store(open && !self.is_quiet(), Ordering::Relaxed);
+        let next = open && !self.is_quiet();
+        if self.center_open.swap(next, Ordering::Relaxed) != next {
+            self.notify_changed();
+        }
     }
 
     pub fn toggle_center_open(&self) -> bool {
@@ -85,7 +104,9 @@ impl Queue {
             self.set_center_open(false);
             return false;
         }
-        self.center_open.fetch_xor(true, Ordering::Relaxed) ^ true
+        let next = self.center_open.fetch_xor(true, Ordering::Relaxed) ^ true;
+        self.notify_changed();
+        next
     }
 
     pub fn is_center_open(&self) -> bool {
@@ -98,6 +119,7 @@ impl Queue {
 
     pub fn clear_history(&self) {
         self.history.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.notify_changed();
     }
 
     fn record_history(&self, replaces: u32, notice: Notice) {
@@ -136,6 +158,7 @@ impl Queue {
                 inner.push_front(notice.clone());
                 let revision = self.start_revision(replaces);
                 self.record_history(replaces, notice);
+                self.notify_changed();
                 return (PushOutcome { id: replaces, evicted: Vec::new() }, revision);
             }
             reserve_id(&self.next_id, replaces);
@@ -151,6 +174,7 @@ impl Queue {
             inner.push_front(notice.clone());
             let revision = self.start_revision(id);
             self.record_history(id, notice);
+            self.notify_changed();
             return (PushOutcome { id, evicted: Vec::new() }, revision);
         }
 
@@ -171,6 +195,7 @@ impl Queue {
             }
         }
         self.record_history(0, notice);
+        self.notify_changed();
         (PushOutcome { id, evicted }, revision)
     }
 
@@ -224,6 +249,7 @@ impl Queue {
         {
             entry.notice.icon = Some(icon);
         }
+        self.notify_changed();
         true
     }
 
@@ -232,6 +258,7 @@ impl Queue {
         let idx = inner.iter().position(|n| n.id == id)?;
         let notice = inner.remove(idx);
         self.revisions.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        self.notify_changed();
         notice
     }
 
@@ -244,6 +271,7 @@ impl Queue {
         let index = inner.iter().position(|notice| notice.id == id)?;
         let notice = inner.remove(index)?;
         revisions.remove(&id);
+        self.notify_changed();
         Some(notice)
     }
 
@@ -267,6 +295,7 @@ impl Queue {
             for notice in &expired {
                 revisions.remove(&notice.id);
             }
+            self.notify_changed();
         }
         expired
     }
@@ -872,5 +901,73 @@ mod tests {
         assert!(q.is_center_open());
         assert!(!q.toggle_center_open());
         assert!(q.toggle_center_open());
+    }
+
+    #[test]
+    fn change_listeners_fire_for_render_relevant_mutations() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        fn notified(queue: &Queue, mutate: impl FnOnce()) -> bool {
+            let listener = queue.on_change();
+            let mut listener = std::pin::pin!(listener);
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(matches!(listener.as_mut().poll(&mut context), Poll::Pending));
+            mutate();
+            matches!(listener.as_mut().poll(&mut context), Poll::Ready(()))
+        }
+
+        let q = Queue::new();
+        assert!(notified(&q, || {
+            q.push_with_outcome(0, mk(0, "A"));
+        }));
+        let (outcome, revision) = q.push_with_revision(0, mk(0, "B"));
+        assert!(notified(&q, || {
+            q.set_icon_if_current(outcome.id, revision, "icon.png".into());
+        }));
+        assert!(notified(&q, || {
+            q.remove_if_current(outcome.id, revision);
+        }));
+        assert!(notified(&q, || {
+            q.clear_history();
+        }));
+        assert!(!notified(&q, || {
+            q.set_manual_quiet(false);
+        }));
+        assert!(notified(&q, || {
+            q.set_manual_quiet(true);
+        }));
+        assert!(notified(&q, || {
+            q.toggle_manual_quiet();
+        }));
+        assert!(!notified(&q, || {
+            q.set_center_open(false);
+        }));
+        assert!(notified(&q, || {
+            q.set_center_open(true);
+        }));
+        assert!(notified(&q, || {
+            q.toggle_center_open();
+        }));
+        assert!(!notified(&q, || {
+            q.set_quiet(false);
+        }));
+        assert!(notified(&q, || {
+            q.set_quiet(true);
+        }));
+
+        let mut expired = mk(0, "Expired");
+        expired.expire_ms = 10;
+        expired.arrived_at_ms = 100;
+        q.push_with_outcome(0, expired);
+        assert!(notified(&q, || {
+            q.remove_expired_at(200);
+        }));
+        assert!(notified(&q, || {
+            q.remove(1);
+        }));
+        assert!(!notified(&q, || {
+            q.remove(999_999);
+        }));
     }
 }

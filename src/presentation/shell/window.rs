@@ -671,6 +671,7 @@ fn spawn_anim_ticker(cx: &mut Context<NotificationStack>) {
     cx.spawn(async move |this, cx| {
         loop {
             let Ok(needs_anim) = this.update(cx, |stack, _| {
+                stack.exiting.retain(|e| clock::elapsed_ms(e.start_ms) < anim::EXIT_MS);
                 let entering = stack
                     .shown_at
                     .values()
@@ -701,6 +702,7 @@ fn spawn_anim_ticker(cx: &mut Context<NotificationStack>) {
 fn spawn_feed_sync(queue: Queue, cx: &mut Context<NotificationStack>) {
     cx.spawn(async move |this, cx| {
         loop {
+            let changed = queue.on_change();
             let snapshot = commands::snapshot(&queue);
 
             if this
@@ -733,7 +735,8 @@ fn spawn_feed_sync(queue: Queue, cx: &mut Context<NotificationStack>) {
                 break;
             }
 
-            cx.background_executor().timer(Duration::from_millis(100)).await;
+            let fallback = cx.background_executor().timer(Duration::from_secs(2));
+            let _ = futures_lite::future::or(changed, fallback).await;
         }
     })
     .detach();

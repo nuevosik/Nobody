@@ -111,11 +111,11 @@ fn run_daemon() -> zbus::Result<()> {
         .detach();
 
         let quiet_queue = queue.clone();
-        cx.spawn(async move |cx: &mut AsyncApp| {
+        cx.spawn(async move |_cx: &mut AsyncApp| {
             loop {
-                let quiet = blocking::unblock(fullscreen::quiet_mode).await;
-                quiet_queue.set_quiet(quiet);
-                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let changed = fullscreen::changed();
+                quiet_queue.set_quiet(fullscreen::quiet_mode());
+                changed.await;
             }
         })
         .detach();

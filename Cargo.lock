@@ -3087,6 +3087,8 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "blocking",
+ "event-listener",
+ "futures-lite",
  "gpui",
  "gpui_platform",
  "image",

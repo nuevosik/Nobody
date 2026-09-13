@@ -1,11 +1,126 @@
-use std::io::Read;
+use std::ffi::OsStr;
+use std::io::{BufRead, BufReader, ErrorKind, Read};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-const TTL: std::time::Duration = std::time::Duration::from_secs(1);
+const QUERY_TIMEOUT: Duration = Duration::from_millis(500);
+const SOCKET_POLL: Duration = Duration::from_millis(50);
+const DEBOUNCE: Duration = Duration::from_millis(120);
+const RESYNC: Duration = Duration::from_secs(30);
+const RETRY: Duration = Duration::from_secs(1);
 
-static CACHE: OnceLock<Mutex<(Option<bool>, Instant)>> = OnceLock::new();
+static QUIET: AtomicBool = AtomicBool::new(false);
+static CHANGES: OnceLock<event_listener::Event> = OnceLock::new();
+static WATCHER: OnceLock<()> = OnceLock::new();
+
+fn changes() -> &'static event_listener::Event {
+    CHANGES.get_or_init(event_listener::Event::new)
+}
+
+fn publish(quiet: bool) {
+    if QUIET.swap(quiet, Ordering::Relaxed) != quiet {
+        changes().notify(usize::MAX);
+    }
+}
+
+pub fn changed() -> event_listener::EventListener {
+    changes().listen()
+}
+
+pub fn quiet_mode() -> bool {
+    WATCHER.get_or_init(|| {
+        if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+            std::thread::spawn(watch);
+        }
+    });
+    QUIET.load(Ordering::Relaxed)
+}
+
+fn watch() {
+    loop {
+        let socket = socket_path(
+            std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+            std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").as_deref(),
+        )
+        .and_then(|path| UnixStream::connect(path).ok());
+        match socket {
+            Some(stream) => read_events(stream),
+            None => publish(query()),
+        }
+        std::thread::sleep(RETRY);
+    }
+}
+
+fn read_events(stream: UnixStream) {
+    if stream.set_read_timeout(Some(SOCKET_POLL)).is_err() {
+        return;
+    }
+    publish(query());
+    let mut reader = BufReader::new(stream);
+    let mut line = Vec::new();
+    let mut dirty = false;
+    let mut last_event = Instant::now();
+    let mut last_query = Instant::now();
+    loop {
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => return,
+            Ok(_) => {
+                if line.ends_with(b"\n") {
+                    if relevant(&String::from_utf8_lossy(&line)) {
+                        dirty = true;
+                        last_event = Instant::now();
+                    }
+                    line.clear();
+                }
+            }
+            Err(error) if is_timeout(&error) => {
+                if should_query(dirty, last_event.elapsed(), last_query.elapsed()) {
+                    publish(query());
+                    last_query = Instant::now();
+                    dirty = false;
+                }
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+fn is_timeout(error: &std::io::Error) -> bool {
+    matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+}
+
+fn should_query(dirty: bool, since_last_event: Duration, since_last_query: Duration) -> bool {
+    (dirty && since_last_event >= DEBOUNCE) || since_last_query >= RESYNC
+}
+
+fn relevant(line: &str) -> bool {
+    let event = line.split(">>").next().unwrap_or("");
+    !matches!(
+        event,
+        "windowtitle"
+            | "activewindow"
+            | "activewindowv2"
+            | "submap"
+            | "screencast"
+            | "urgent"
+            | "activelayout"
+            | "configreloaded"
+            | "openlayer"
+            | "closelayer"
+            | "lockgroups"
+            | "pin"
+    )
+}
+
+fn socket_path(xdg_runtime_dir: Option<&OsStr>, signature: Option<&OsStr>) -> Option<PathBuf> {
+    let dir = xdg_runtime_dir.filter(|value| !value.is_empty())?;
+    let signature = signature.filter(|value| !value.is_empty())?;
+    Some(PathBuf::from(dir).join("hypr").join(signature).join(".socket2.sock"))
+}
 
 pub fn parse_quiet(out: &str) -> bool {
     let mut documents = serde_json::Deserializer::from_str(out).into_iter::<serde_json::Value>();
@@ -64,18 +179,8 @@ fn query() -> bool {
     }
     query_command(
         Command::new("hyprctl").args(["-j", "--batch", "activeworkspace; clients"]),
-        std::time::Duration::from_millis(500),
+        QUERY_TIMEOUT,
     )
-}
-
-pub fn quiet_mode() -> bool {
-    let cache = CACHE.get_or_init(|| Mutex::new((None, Instant::now())));
-    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-    if guard.0.is_none_or(|_| guard.1.elapsed() >= TTL) {
-        guard.0 = Some(query());
-        guard.1 = Instant::now();
-    }
-    guard.0.unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -134,5 +239,61 @@ mod tests {
         assert!(!parse_quiet(r#"{"id":5} ["#));
         assert!(!parse_quiet(r#"{} [{"fullscreen":2}]"#));
         assert!(!parse_quiet(r#"{"id":5} {}"#));
+    }
+
+    #[test]
+    fn only_relevant_events_invalidate_the_fullscreen_state() {
+        for line in [
+            "workspace>>2",
+            "focusedmon>>DP-1,1",
+            "openwindow>>abc,1,kitty",
+            "closewindow>>abc",
+            "movewindow>>abc,2",
+            "fullscreen>>1",
+            "minimize>>abc,1",
+            "changefloatingmode>>abc,1",
+            "monitorremoved>>DP-1",
+        ] {
+            assert!(relevant(line), "{line} deveria invalidar o estado");
+        }
+        for line in [
+            "windowtitle>>abc,title",
+            "activewindowv2>>abc",
+            "submap>>",
+            "screencast>>1,1",
+            "urgent>>abc",
+            "activelayout>>kbd,us",
+            "configreloaded>>",
+            "openlayer>>ns",
+            "closelayer>>ns",
+            "lockgroups>>abc",
+            "pin>>abc,1",
+        ] {
+            assert!(!relevant(line), "{line} não deveria invalidar o estado");
+        }
+    }
+
+    #[test]
+    fn debounce_and_resync_decide_queries() {
+        let just_now = Duration::ZERO;
+        let fresh = Duration::from_millis(1);
+        assert!(!should_query(false, just_now, fresh));
+        assert!(!should_query(true, just_now, fresh));
+        assert!(should_query(true, DEBOUNCE, fresh));
+        assert!(should_query(false, just_now, RESYNC));
+        assert!(should_query(true, just_now, RESYNC));
+    }
+
+    #[test]
+    fn socket_path_requires_both_environment_values() {
+        let dir = OsStr::new("/run/user/1000");
+        let signature = OsStr::new("hypr-abc");
+        assert_eq!(
+            socket_path(Some(dir), Some(signature)),
+            Some(PathBuf::from("/run/user/1000/hypr/hypr-abc/.socket2.sock"))
+        );
+        assert_eq!(socket_path(None, Some(signature)), None);
+        assert_eq!(socket_path(Some(dir), None), None);
+        assert_eq!(socket_path(Some(OsStr::new("")), Some(signature)), None);
     }
 }
