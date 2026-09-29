@@ -37,8 +37,30 @@ git push origin HEAD
 git push origin "$tag"
 
 echo
-echo "tag ${tag} pushed. Actions will attach ${tag} artifacts."
-echo "  https://github.com/nuevosik/Nobody/actions"
-echo
-echo "install from the release once it finishes:"
-echo "  curl -fsSL https://github.com/nuevosik/Nobody/releases/latest/download/install.sh | sh"
+echo "tag ${tag} pushed; waiting for the release to be published."
+
+if command -v gh >/dev/null 2>&1; then
+  published=0
+  for _ in {1..90}; do
+    if gh release view "$tag" >/dev/null 2>&1; then
+      published=1
+      break
+    fi
+    sleep 10
+  done
+  if [ "$published" -ne 1 ]; then
+    echo "error: ${tag} was tagged and pushed but no release was published." >&2
+    echo "       releases/latest still resolves to the previous release, so install.sh" >&2
+    echo "       would silently install the old version." >&2
+    echo "       check the run:  gh run list --workflow=release.yml --limit 3" >&2
+    exit 1
+  fi
+  echo "release ${tag} published."
+  echo
+  echo "install it with:"
+  echo "  curl -fsSL https://github.com/nuevosik/Nobody/releases/latest/download/install.sh | sh"
+else
+  echo "gh not found; could not confirm that ${tag} was published." >&2
+  echo "verify the Actions tab before announcing the release:" >&2
+  echo "  https://github.com/nuevosik/Nobody/actions" >&2
+fi

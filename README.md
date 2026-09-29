@@ -216,12 +216,26 @@ domain <- application <- infrastructure / presentation
 
 ## Development
 
+`scripts/check.sh` runs exactly what CI runs, and the same script is wired as
+a pre-push hook, so a push that would go red stops on this machine instead:
+
+```bash
+./scripts/check.sh
+```
+
+In order:
+
 ```bash
 cargo fmt --check
 cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
+! rg -n 'infrastructure::|crate::(daemon|icons)' src/presentation
+! rg -n 'presentation::' src/infrastructure
 cargo test --all-targets
 ```
+
+The two `rg` guards enforce the layer rule: `presentation` and
+`infrastructure` never import each other.
 
 ## Release
 
