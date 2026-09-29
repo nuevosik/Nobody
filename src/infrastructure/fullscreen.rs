@@ -145,7 +145,7 @@ pub(crate) fn command_output(
     let Ok(mut child) = command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else {
         return None;
     };
-    let stdout = child.stdout.take().expect("stdout is piped");
+    let stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         stdout.take(64 * 1024).read_to_end(&mut bytes).map(|_| bytes)

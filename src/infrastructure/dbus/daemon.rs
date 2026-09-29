@@ -83,7 +83,7 @@ fn enqueue_icon_job(job: IconJob) {
                 let Some(job) = job else {
                     break;
                 };
-                job.run();
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run()));
             }
         })
         .detach();
@@ -313,5 +313,32 @@ mod tests {
         assert_eq!(pending_ids.len(), active.len());
         assert!(active.iter().all(|notice| pending_ids.contains(&notice.id)));
         assert_eq!(jobs.active, MAX_ICON_JOBS - 1);
+    }
+
+    #[test]
+    fn a_caught_panic_inside_a_blocking_job_leaves_the_pool_running() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let reached_end = Arc::new(AtomicBool::new(false));
+        let flag = reached_end.clone();
+        blocking::unblock(move || {
+            let _ = std::panic::catch_unwind(|| panic!("simulated icon job failure"));
+            flag.store(true, Ordering::SeqCst);
+        })
+        .detach();
+        for _ in 0..200 {
+            if reached_end.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::panic::set_hook(previous);
+        assert!(
+            reached_end.load(Ordering::SeqCst),
+            "a caught panic must not stop the job body from finishing"
+        );
     }
 }

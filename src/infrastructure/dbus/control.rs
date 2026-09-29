@@ -67,7 +67,7 @@ impl ControlService {
     }
 
     pub fn center_toggle(&self) {
-        self.queue.toggle_center_open();
+        commands::toggle_center(&self.queue);
     }
 
     pub fn dismiss_all(&self) {
@@ -91,20 +91,20 @@ impl ControlService {
     }
 
     pub fn dnd_on(&self) {
-        self.queue.set_manual_quiet(true);
+        commands::set_manual_quiet(&self.queue, true);
     }
 
     pub fn dnd_off(&self) {
-        self.queue.set_manual_quiet(false);
+        commands::set_manual_quiet(&self.queue, false);
     }
 
     pub fn dnd_toggle(&self) {
-        self.queue.toggle_manual_quiet();
+        commands::toggle_manual_quiet(&self.queue);
     }
 
     pub fn dnd_status(&self) -> (bool, bool, bool) {
-        let manual = self.queue.is_manual_quiet();
-        let auto = self.queue.is_quiet();
+        let manual = commands::manual_quiet(&self.queue);
+        let auto = commands::quiet_mode(&self.queue);
         (manual, auto, manual || auto)
     }
 }

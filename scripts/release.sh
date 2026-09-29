@@ -23,7 +23,7 @@ if git rev-parse "$tag" >/dev/null 2>&1; then
 fi
 
 sed -i "s/^version = \".*\"/version = \"${version}\"/" Cargo.toml
-cargo generate-lockfile --offline >/dev/null 2>&1 || cargo generate-lockfile >/dev/null
+cargo update --workspace --offline >/dev/null
 
 git add Cargo.toml Cargo.lock
 if git diff --cached --quiet; then

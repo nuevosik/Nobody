@@ -11,7 +11,7 @@ pub(crate) fn next_available_id(next_id: &AtomicU32, notices: &VecDeque<Notice>)
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 Some(current.checked_add(1).unwrap_or(1))
             })
-            .expect("the ID generator always produces a value");
+            .unwrap_or_else(|previous| previous);
         if !notices.iter().any(|notice| notice.id == id) {
             return id;
         }

@@ -753,8 +753,8 @@ fn default_action_emits_once_before_close_and_keeps_history() {
     let (events, ready, listener) = lifecycle_events(&client, id);
     ready.recv_timeout(Duration::from_secs(1)).expect("signal listener startup");
 
-    commands::request_default_action(&queue, id);
-    commands::request_default_action(&queue, id);
+    commands::request_action(&queue, id, "default");
+    commands::request_action(&queue, id, "default");
     zbus::block_on(host::flush_lifecycle_events(&server));
 
     let captured = events.recv_timeout(Duration::from_secs(1)).expect("action lifecycle signals");
@@ -830,7 +830,7 @@ fn actions_skip_removed_expired_replaced_and_dismissed_notices() {
     let ids: Vec<_> = (0..4)
         .map(|_| {
             let id = queue.push_with_outcome(0, actionable.clone()).id;
-            commands::request_default_action(&queue, id);
+            commands::request_action(&queue, id, "default");
             commands::request_action(&queue, id, "settings");
             id
         })
@@ -880,7 +880,7 @@ fn lifecycle_waits_for_interface_mutation_and_revalidates_pending_action() {
     let mut actionable = notice("App");
     actionable.actions = vec!["default".into(), "Abrir".into()];
     let id = queue.push_with_outcome(0, actionable).id;
-    commands::request_default_action(&queue, id);
+    commands::request_action(&queue, id, "default");
     let marker = queue.push_with_outcome(0, notice("Marker")).id;
     let (events, ready, listener) = lifecycle_events(&client, marker);
     ready.recv_timeout(Duration::from_secs(1)).expect("signal listener startup");
@@ -923,7 +923,7 @@ fn failed_action_signal_preserves_notice_and_is_not_requeued() {
     let mut actionable = notice("App");
     actionable.actions = vec!["default".into(), "Abrir".into()];
     let id = queue.push_with_outcome(0, actionable).id;
-    commands::request_default_action(&queue, id);
+    commands::request_action(&queue, id, "default");
     let active = queue.snapshot();
     let history = queue.history_snapshot();
 

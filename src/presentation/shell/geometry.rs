@@ -64,11 +64,11 @@ pub fn decks(notices: &[Notice], expanded: Option<&str>) -> Vec<Deck> {
     let mut order: Vec<String> = Vec::new();
     let mut map: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, n) in notices.iter().enumerate() {
-        map.entry(n.app.clone()).or_insert_with(|| {
+        let indices = map.entry(n.app.clone()).or_default();
+        if indices.is_empty() {
             order.push(n.app.clone());
-            Vec::new()
-        });
-        map.get_mut(&n.app).expect("app recém-inserido").push(i);
+        }
+        indices.push(i);
     }
     order
         .into_iter()

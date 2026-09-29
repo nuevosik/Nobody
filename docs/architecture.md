@@ -21,14 +21,16 @@ Guards in CI (must print nothing):
 
 ## Layers
 
-- **domain** (`notice.rs`, `queue.rs`, `ids.rs`, `close.rs`, `history.rs`) — pure entities:
+- **domain** (`notice.rs`, `queue.rs`, `ids.rs`, `close.rs`, `history.rs`,
+  `action.rs`) — pure entities:
   notification, bounded queue (`KEEP=12`), id allocation, close reasons,
   bounded history (`HISTORY_KEEP=100`, own `seq` ids) plus shared
   manual-DND / center-open flags. Every render-relevant mutation notifies a
   change event consumed by the UI. No I/O, no logging.
-- **application** (`policy.rs`, `commands.rs`, `clock.rs`, `cli.rs`) — use cases:
-  expiry policy (default 5s), queue commands, history query/clear/search,
-  DND and center toggles, CLI arg parsing, monotonic clock. No I/O.
+- **application** (`policy.rs`, `commands.rs`, `clock.rs`, `cli.rs`,
+  `config.rs`) — use cases: expiry policy (default 5s), queue commands, history
+  query/clear/search, DND and center toggles, CLI arg parsing, monotonic clock,
+  pure config parsing (the file I/O lives in `infrastructure/config.rs`). No I/O.
 - **infrastructure/dbus** (`daemon.rs`, `host.rs`, `control.rs`, `validation.rs`,
   `markup.rs`) — `org.freedesktop.Notifications` adapter: validates and
   truncates payloads, strips markup, owns the bus name before opening the UI,
@@ -46,10 +48,13 @@ Guards in CI (must print nothing):
 - **infrastructure/activation** (`activation.rs`) — Hyprland-only focus for the
   `default` action: picks the most recent mapped window matching
   `desktop-entry` or app name and dispatches `hl.dsp.focus`; no-ops elsewhere.
-- **presentation** (`theme.rs`, `shell/window.rs`, `feed.rs`, `geometry.rs`,
-  `popup.rs`, `anim.rs`) — layer-shell overlay: reads `snapshot` on queue
-  change events (2 s fallback), diffs by id, draws at most 5 cards with
-  enter/exit animation.
+- **presentation** (`theme.rs`, `shell/window.rs`, `shell/center.rs`,
+  `feed.rs`, `geometry.rs`, `popup.rs`, `anim.rs`) — layer-shell overlay: reads
+  `snapshot` on queue change events (2 s fallback), diffs by id, draws at most 5
+  cards with enter/exit animation. `center.rs` holds the notification center's
+  pure text helpers — search-field editing, IME/UTF-16 range mapping, DND
+  labels and age formatting — with no gpui dependency; the panel itself lives
+  in `window.rs::render_center` and reads `NotificationStack.center_query`.
 
 ## Data flow
 
@@ -87,3 +92,6 @@ Integration tests use only the public API (`nobody::...`):
 - `tests/dbus_contract.rs` — capabilities announce `body`, `actions`,
   `icon-static`, `x-dunst-stack-tag`, `x-canonical-private-synchronous`
   and `value`; closing an unknown id is silent.
+- `tests/control_cli.rs` — end-to-end lifecycle on an isolated session bus:
+  tag replacement, action emission, slow/held MPRIS backpressure, icon worker
+  exhaustion, bus ownership and reconnect, and the CLI binary contract.

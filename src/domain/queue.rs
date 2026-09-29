@@ -126,8 +126,8 @@ impl Queue {
         let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
         if replaces != 0
             && let Some(pos) = history.iter().position(|e| e.notice.id == replaces)
+            && let Some(mut entry) = history.remove(pos)
         {
-            let mut entry = history.remove(pos).expect("posição recém-encontrada");
             entry.notice = notice;
             history.push_front(entry);
             return;

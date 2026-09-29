@@ -163,20 +163,20 @@ fn bgra_render(small: image::RgbaImage) -> Option<Arc<gpui::RenderImage>> {
     Some(Arc::new(gpui::RenderImage::new(smallvec::SmallVec::from_elem(frame, 1))))
 }
 
+fn badge_image() -> Option<Arc<gpui::RenderImage>> {
+    let rgba = image::load_from_memory(include_bytes!("../../../assets/nobody-badge.png"))
+        .ok()?
+        .into_rgba8();
+    let small =
+        image::imageops::resize(&rgba, BADGE_PX, BADGE_PX, image::imageops::FilterType::Lanczos3);
+    bgra_render(small)
+}
+
 pub fn nobody_badge() -> gpui::Div {
-    static BADGE: LazyLock<Arc<gpui::RenderImage>> = LazyLock::new(|| {
-        let rgba = image::load_from_memory(include_bytes!("../../../assets/nobody-badge.png"))
-            .expect("assets/nobody-badge.png é PNG válido")
-            .into_rgba8();
-        let small = image::imageops::resize(
-            &rgba,
-            BADGE_PX,
-            BADGE_PX,
-            image::imageops::FilterType::Lanczos3,
-        );
-        bgra_render(small).expect("resize gera dimensões válidas")
-    });
-    div().child(img(BADGE.clone()).size(px(28.)).object_fit(gpui::ObjectFit::Contain))
+    static BADGE: LazyLock<Option<Arc<gpui::RenderImage>>> = LazyLock::new(badge_image);
+    div().when_some(BADGE.clone(), |el, badge| {
+        el.child(img(badge).size(px(28.)).object_fit(gpui::ObjectFit::Contain))
+    })
 }
 
 pub fn card_content(notice: &Notice) -> gpui::Div {
@@ -259,6 +259,13 @@ mod tests {
             cache.insert(PathBuf::from("new.png"), None);
         }
         assert_eq!(cache.order.len(), RASTER_CACHE_LIMIT);
+    }
+
+    #[test]
+    fn embedded_badge_decodes_at_the_display_size() {
+        let badge = badge_image().expect("assets/nobody-badge.png must decode");
+        let bytes = badge.as_bytes(0).expect("one frame");
+        assert_eq!(bytes.len(), BADGE_PX as usize * BADGE_PX as usize * 4);
     }
 
     #[test]

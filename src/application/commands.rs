@@ -19,10 +19,6 @@ pub fn request_action(queue: &Queue, id: u32, key: &str) {
     queue.request_action(id, key);
 }
 
-pub fn request_default_action(queue: &Queue, id: u32) {
-    request_action(queue, id, "default");
-}
-
 pub fn dismiss_all(queue: &Queue) {
     for notice in snapshot(queue) {
         request_dismissal(queue, notice.id);
@@ -147,19 +143,19 @@ mod tests {
     }
 
     #[test]
-    fn request_default_action_requires_an_active_default_pair() {
+    fn request_action_dedups_and_requires_an_active_pair() {
         let queue = Queue::new();
         let mut notice = mk("App", 0, 1);
         notice.actions = vec!["default".into(), "Abrir".into()];
         let id = queue.push_with_outcome(0, notice).id;
-        request_default_action(&queue, id);
-        request_default_action(&queue, id);
+        request_action(&queue, id, "default");
+        request_action(&queue, id, "default");
         let requests = queue.drain_action_requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].id, id);
         assert!(requests[0].revision > 0);
         assert_eq!(requests[0].key, "default");
-        request_default_action(&queue, id + 1);
+        request_action(&queue, id + 1, "default");
         assert!(queue.drain_action_requests().is_empty());
     }
 

@@ -10,6 +10,7 @@ use gpui::{
 
 use crate::application::config::{Anchor as ConfigAnchor, Config};
 use crate::application::{clock, commands};
+use crate::domain::notice::Notice;
 use crate::domain::queue::Queue;
 use crate::presentation::theme::{
     ACCENT, CARD_GAP, CARD_H, CARD_R, CHIP, FONT, INK, MARGIN, MUTED, POPUP_W, QUIET_BADGE, TEXT,
@@ -39,12 +40,106 @@ pub struct NotificationStack {
     dnd_manual: bool,
     dnd_auto: bool,
     expanded: Option<String>,
-    last_expanded: Option<String>,
+    last_window_h: Option<f32>,
+    fullscreen_hidden: bool,
+    glide: GlideState,
+}
+
+pub(crate) struct Layout {
+    pub deck_list: Vec<geometry::Deck>,
+    pub shown: Vec<geometry::ShownDeck>,
+    pub positions: Vec<f32>,
+    pub input_regions: Vec<Bounds<gpui::Pixels>>,
+    pub total_h: f32,
+}
+
+#[derive(Default)]
+pub(crate) struct GlideState {
     smooth_y: HashMap<u32, f32>,
     target_y: HashMap<u32, f32>,
     shown_at: HashMap<u32, u128>,
-    last_window_h: Option<f32>,
-    fullscreen_hidden: bool,
+    last_expanded: Option<String>,
+}
+
+impl GlideState {
+    pub(crate) fn shown_at(&self, id: u32) -> Option<u128> {
+        self.shown_at.get(&id).copied()
+    }
+
+    pub(crate) fn is_entering(&self, now: u128) -> bool {
+        self.shown_at.values().any(|&shown| now.saturating_sub(shown) < anim::ENTER_MS)
+    }
+
+    pub(crate) fn is_settling(&self) -> bool {
+        self.target_y
+            .iter()
+            .any(|(id, target)| self.smooth_y.get(id).is_some_and(|s| (s - target).abs() >= 0.5))
+    }
+
+    pub(crate) fn advance(
+        &mut self,
+        notices: &[Notice],
+        max_visible: usize,
+        expanded: Option<&str>,
+        exiting_alive: &[&feed::Exiting],
+        reduced: bool,
+        now: u128,
+    ) -> Layout {
+        let deck_list = geometry::decks(notices, expanded);
+        let shown = geometry::shown_decks(&deck_list, visible_count(notices.len(), max_visible));
+        let (y_map, _, _) = geometry::deck_layout(notices, &deck_list, &shown);
+
+        let live: HashSet<u32> = notices.iter().map(|notice| notice.id).collect();
+        self.smooth_y.retain(|id, _| live.contains(id));
+        self.target_y.retain(|id, _| live.contains(id));
+        self.shown_at.retain(|id, _| live.contains(id));
+
+        let expanded_changed = self.last_expanded.as_deref() != expanded;
+        for slot in &shown {
+            let deck_top = y_map[deck_list[slot.deck].indices[0]];
+            for &idx in &slot.indices {
+                let id = notices[idx].id;
+                self.target_y.insert(id, y_map[idx]);
+                self.shown_at.entry(id).or_insert(now);
+                let current = self.smooth_y.get(&id).copied().unwrap_or(deck_top);
+                let next = if reduced || expanded_changed {
+                    y_map[idx]
+                } else {
+                    step_toward(current, y_map[idx]).0
+                };
+                self.smooth_y.insert(id, next);
+            }
+        }
+        self.last_expanded = expanded.map(str::to_owned);
+
+        let mut total_h_current = 0f32;
+        for slot in &shown {
+            let deck = &deck_list[slot.deck];
+            for &idx in &slot.indices {
+                let id = notices[idx].id;
+                let mut top = self.smooth_y.get(&id).copied().unwrap_or(y_map[idx]) + CARD_H;
+                if deck.collapsed && idx == deck.indices[0] {
+                    top += geometry::STACK_PEEK;
+                }
+                total_h_current = total_h_current.max(top);
+            }
+        }
+        let exiting_max_y = exiting_alive.iter().map(|e| e.y + CARD_H).fold(0., f32::max);
+        let total_h = if exiting_alive.is_empty() {
+            total_h_current
+        } else {
+            total_h_current.max(exiting_max_y + CARD_GAP)
+        };
+
+        let positions: Vec<f32> = notices
+            .iter()
+            .enumerate()
+            .map(|(i, notice)| self.smooth_y.get(&notice.id).copied().unwrap_or(y_map[i]))
+            .collect();
+        let input_regions = geometry::deck_input_regions(&deck_list, &shown, &positions);
+
+        Layout { deck_list, shown, positions, input_regions, total_h }
+    }
 }
 
 pub(crate) fn step_toward(current: f32, target: f32) -> (f32, bool) {
@@ -82,12 +177,9 @@ impl NotificationStack {
             dnd_manual: false,
             dnd_auto: false,
             expanded: None,
-            last_expanded: None,
-            smooth_y: HashMap::new(),
-            target_y: HashMap::new(),
-            shown_at: HashMap::new(),
             last_window_h: None,
             fullscreen_hidden: false,
+            glide: GlideState::default(),
         }
     }
 
@@ -152,10 +244,9 @@ impl NotificationStack {
                         path.line_to(origin + point(r, r));
                         path.curve_to(origin, origin + point(r, px(0.)));
                         path.close();
-                        window.paint_path(
-                            path.build().expect("valid panel outline"),
-                            fade(INK, 0.92),
-                        );
+                        if let Ok(outline) = path.build() {
+                            window.paint_path(outline, fade(INK, 0.92));
+                        }
                     },
                 )
                 .absolute()
@@ -672,15 +763,9 @@ fn spawn_anim_ticker(cx: &mut Context<NotificationStack>) {
         loop {
             let Ok(needs_anim) = this.update(cx, |stack, _| {
                 stack.exiting.retain(|e| clock::elapsed_ms(e.start_ms) < anim::EXIT_MS);
-                let entering = stack
-                    .shown_at
-                    .values()
-                    .any(|&shown_at| clock::elapsed_ms(shown_at) < anim::ENTER_MS);
+                let entering = stack.glide.is_entering(clock::now_ms());
                 let exiting = !stack.exiting.is_empty();
-                let settling = stack
-                    .target_y
-                    .iter()
-                    .any(|(id, t)| stack.smooth_y.get(id).is_some_and(|s| (s - t).abs() >= 0.5));
+                let settling = stack.glide.is_settling();
                 entering || exiting || settling
             }) else {
                 break;
@@ -744,7 +829,7 @@ fn spawn_feed_sync(queue: Queue, cx: &mut Context<NotificationStack>) {
 
 impl gpui::Render for NotificationStack {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
-        if self.queue.is_quiet() {
+        if commands::quiet_mode(&self.queue) {
             if !self.fullscreen_hidden {
                 window.resize(Size::new(px(1.), px(1.)));
                 window.set_input_region(Some(&[]));
@@ -781,64 +866,29 @@ impl gpui::Render for NotificationStack {
                 .into_any_element();
         }
 
-        let n = visible_count(self.stack.notices.len(), self.max_visible);
         let card_h = CARD_H;
-
         let exiting_alive: Vec<&feed::Exiting> =
             self.exiting.iter().filter(|e| clock::elapsed_ms(e.start_ms) < anim::EXIT_MS).collect();
-        let exiting_max_y = exiting_alive.iter().map(|e| e.y + card_h).fold(0., f32::max);
-        let deck_list = geometry::decks(&self.stack.notices, self.expanded.as_deref());
-        let shown = geometry::shown_decks(&deck_list, n);
-        let (y_map, _, _) = geometry::deck_layout(&self.stack.notices, &deck_list, &shown);
         let reduced = anim::prefers_reduced_motion();
-        let now = clock::now_ms();
-        let live: HashSet<u32> = self.stack.notices.iter().map(|n| n.id).collect();
-        self.smooth_y.retain(|id, _| live.contains(id));
-        self.target_y.retain(|id, _| live.contains(id));
-        self.shown_at.retain(|id, _| live.contains(id));
-        for s in &shown {
-            let deck_top = y_map[deck_list[s.deck].indices[0]];
-            for &idx in &s.indices {
-                let id = self.stack.notices[idx].id;
-                self.target_y.insert(id, y_map[idx]);
-                self.shown_at.entry(id).or_insert(now);
-                let cur = self.smooth_y.get(&id).copied().unwrap_or(deck_top);
-                let next = if reduced || self.last_expanded != self.expanded {
-                    y_map[idx]
-                } else {
-                    step_toward(cur, y_map[idx]).0
-                };
-                self.smooth_y.insert(id, next);
-            }
-        }
-        self.last_expanded = self.expanded.clone();
-        let mut total_h_current = 0f32;
-        for s in &shown {
-            let deck = &deck_list[s.deck];
-            for &idx in &s.indices {
-                let id = self.stack.notices[idx].id;
-                let mut top = self.smooth_y.get(&id).copied().unwrap_or(y_map[idx]) + CARD_H;
-                if deck.collapsed && idx == deck.indices[0] {
-                    top += geometry::STACK_PEEK;
-                }
-                total_h_current = total_h_current.max(top);
-            }
-        }
-        let total_h = if exiting_alive.is_empty() {
-            total_h_current
-        } else {
-            total_h_current.max(exiting_max_y + CARD_GAP)
-        };
-        let positions: Vec<f32> = self
-            .stack
-            .notices
-            .iter()
-            .enumerate()
-            .map(|(i, notice)| self.smooth_y.get(&notice.id).copied().unwrap_or(y_map[i]))
-            .collect();
-        let input_regions = geometry::deck_input_regions(&deck_list, &shown, &positions);
+        let layout = self.glide.advance(
+            &self.stack.notices,
+            self.max_visible,
+            self.expanded.as_deref(),
+            &exiting_alive,
+            reduced,
+            clock::now_ms(),
+        );
+        let deck_list = &layout.deck_list;
+        let shown = &layout.shown;
+        let positions = &layout.positions;
+        let input_regions = &layout.input_regions;
 
-        geometry::sync_window_geometry(window, &mut self.last_window_h, &input_regions, total_h);
+        geometry::sync_window_geometry(
+            window,
+            &mut self.last_window_h,
+            input_regions,
+            layout.total_h,
+        );
 
         if !shown.is_empty() && !self.popup_focus.contains_focused(window, cx) {
             window.focus(&self.popup_focus, cx);
@@ -928,7 +978,7 @@ impl gpui::Render for NotificationStack {
                         let notice = &self.stack.notices[idx];
                         let hidden = if deck.collapsed && m == 0 { deck.hidden_count() } else { 0 };
                         let shown_since =
-                            self.shown_at.get(&notice.id).copied().unwrap_or(notice.arrived_at_ms);
+                            self.glide.shown_at(notice.id).unwrap_or(notice.arrived_at_ms);
                         let t = anim::enter_progress(shown_since);
                         let slide = if reduced { 0. } else { (1. - t) * (POPUP_W + MARGIN) };
                         if hidden > 0 {
@@ -1253,5 +1303,121 @@ mod tests {
     fn visible_count_caps_full_queue() {
         assert_eq!(visible_count(KEEP, 5), 5);
         assert_eq!(visible_count(KEEP, 12), KEEP);
+    }
+
+    use crate::presentation::theme::STACK_TOP;
+
+    fn mk(id: u32, app: &str) -> Notice {
+        Notice {
+            id,
+            app: app.into(),
+            desktop_entry: None,
+            summary: "s".into(),
+            body: "".into(),
+            icon: None,
+            actions: vec![],
+            expire_ms: 0,
+            arrived_at_ms: 0,
+            stack_tag: None,
+            progress: None,
+        }
+    }
+
+    #[test]
+    fn advance_glides_existing_cards_toward_their_new_slot() {
+        let mut glide = GlideState::default();
+        let both = vec![mk(1, "A"), mk(2, "B")];
+        let first = glide.advance(&both, 5, None, &[], false, 1_000);
+        let b_start = first.positions[1];
+        assert!((b_start - (STACK_TOP + CARD_H + CARD_GAP)).abs() < 0.01);
+        assert!(!glide.is_settling(), "a fresh layout is already at rest");
+
+        let only_b = vec![mk(2, "B")];
+        let second = glide.advance(&only_b, 5, None, &[], false, 1_016);
+        let moved = second.positions[0];
+        assert!(moved < b_start, "card must glide toward the freed slot: {moved} >= {b_start}");
+        assert!(moved > STACK_TOP, "one frame must not snap to the target: {moved}");
+        assert!(glide.is_settling());
+    }
+
+    #[test]
+    fn advance_snaps_under_reduced_motion_and_on_expansion_change() {
+        let both = vec![mk(1, "A"), mk(2, "B")];
+        let only_b = vec![mk(2, "B")];
+
+        let mut reduced = GlideState::default();
+        reduced.advance(&both, 5, None, &[], false, 1_000);
+        let snapped = reduced.advance(&only_b, 5, None, &[], true, 1_016);
+        assert!((snapped.positions[0] - STACK_TOP).abs() < 0.01, "reduced motion jumps");
+        assert!(!reduced.is_settling());
+
+        let mut expanded = GlideState::default();
+        expanded.advance(&both, 5, None, &[], false, 1_000);
+        let jumped = expanded.advance(&only_b, 5, Some("B"), &[], false, 1_016);
+        assert!((jumped.positions[0] - STACK_TOP).abs() < 0.01, "expansion change jumps");
+        assert!(!expanded.is_settling());
+    }
+
+    #[test]
+    fn advance_drops_animation_state_for_vanished_ids() {
+        let mut glide = GlideState::default();
+        glide.advance(&[mk(1, "A"), mk(2, "B")], 5, None, &[], false, 1_000);
+        let second = glide.advance(&[mk(2, "B")], 5, None, &[], false, 1_016);
+        assert_eq!(second.positions.len(), 1);
+        assert!(glide.shown_at(1).is_none(), "a dismissed id must not keep glide state");
+        assert!(glide.shown_at(2).is_some());
+    }
+
+    #[test]
+    fn advance_reserves_room_for_cards_that_are_still_exiting() {
+        let mut glide = GlideState::default();
+        let notices = vec![mk(1, "A")];
+        let plain = glide.advance(&notices, 5, None, &[], false, 1_000);
+        assert_eq!(plain.total_h, STACK_TOP + CARD_H);
+
+        let leaving = feed::Exiting { notice: mk(9, "X"), start_ms: 0, y: 500. };
+        let alive: Vec<&feed::Exiting> = vec![&leaving];
+        let with_exit = glide.advance(&notices, 5, None, &alive, false, 1_016);
+        assert_eq!(with_exit.total_h, 500. + CARD_H + CARD_GAP);
+    }
+
+    #[test]
+    fn advance_adds_the_peek_for_a_collapsed_deck() {
+        let mut single = GlideState::default();
+        let one = single.advance(&[mk(1, "A")], 5, None, &[], false, 1_000);
+        let mut collapsed = GlideState::default();
+        let pair = collapsed.advance(&[mk(1, "A"), mk(2, "A")], 5, None, &[], false, 1_000);
+        assert_eq!(one.total_h, STACK_TOP + CARD_H);
+        assert_eq!(pair.total_h, STACK_TOP + CARD_H + geometry::STACK_PEEK);
+    }
+
+    #[test]
+    fn is_entering_expires_after_the_enter_window() {
+        let mut glide = GlideState::default();
+        glide.advance(&[mk(1, "A")], 5, None, &[], false, 1_000);
+        assert!(glide.is_entering(1_000));
+        assert!(glide.is_entering(1_000 + anim::ENTER_MS - 1));
+        assert!(!glide.is_entering(1_000 + anim::ENTER_MS));
+    }
+
+    #[test]
+    fn animating_predicate_converges_so_the_ticker_can_stop() {
+        let mut glide = GlideState::default();
+        glide.advance(&[mk(1, "A"), mk(2, "B")], 5, None, &[], false, 1_000);
+        let only_b = [mk(2, "B")];
+
+        let mut now = 1_016;
+        let mut frames = 0;
+        while glide.is_entering(now) || glide.is_settling() {
+            glide.advance(&only_b, 5, None, &[], false, now);
+            now += 16;
+            frames += 1;
+            assert!(frames < 1_000, "ticker predicate never converges; would notify every 16ms");
+        }
+        assert!(frames > 0, "the layout change must take at least one frame");
+
+        glide.advance(&only_b, 5, None, &[], false, now);
+        assert!(!glide.is_entering(now + 16));
+        assert!(!glide.is_settling());
     }
 }
