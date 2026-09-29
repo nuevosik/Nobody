@@ -216,14 +216,14 @@ domain <- application <- infrastructure / presentation
 
 ## Development
 
-`scripts/check.sh` runs exactly what CI runs, and the same script is wired as
-a pre-push hook, so a push that would go red stops on this machine instead:
+`scripts/check.sh` runs exactly what CI runs. `.git/hooks/` is not tracked, so
+wire it yourself once per clone to stop a red push on this machine:
 
 ```bash
-./scripts/check.sh
+ln -sf ../../scripts/check.sh .git/hooks/pre-push
 ```
 
-In order:
+It runs, in order:
 
 ```bash
 cargo fmt --check
