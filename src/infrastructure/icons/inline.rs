@@ -7,6 +7,11 @@ use zbus::zvariant::{OwnedValue, Value};
 
 use crate::infrastructure::cache_file;
 
+// ponytail: these caps bound what this module processes and writes, not what
+// zbus already allocated - a hint is fully deserialised before the first check
+// here, and zbus caps a message at MAX_MESSAGE_SIZE (128 MiB, pub(crate), no
+// public knob). Any session-bus peer can force that per Notify. Pre-existing,
+// and equally true of an oversized icon string or hints map.
 pub(crate) const MAX_DIMENSION: u32 = 2048;
 pub(crate) const INLINE_PX: u32 = 64;
 pub(crate) const MAX_FILES: usize = 128;
