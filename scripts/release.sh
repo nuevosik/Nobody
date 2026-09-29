@@ -27,7 +27,7 @@ fi
 # it creates no release: releases/latest keeps resolving to the previous one
 # and install.sh silently serves the old version.
 has_gh=0
-if command -v gh >/dev/null 2>&1; then
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
   has_gh=1
 fi
 
@@ -48,8 +48,10 @@ if [ "$has_gh" -eq 1 ] && [ "${NOBODY_RELEASE_FORCE:-0}" != "1" ]; then
   if [ -n "$probe" ] && [ "$(run_steps "$probe")" = "0" ]; then
     echo "error: the newest workflow run executed no steps, so Actions is not" >&2
     echo "       starting jobs on this account. Tagging now would create no" >&2
-    echo "       release. Fix billing at https://github.com/settings/billing," >&2
-    echo "       or override with NOBODY_RELEASE_FORCE=1." >&2
+    echo "       release." >&2
+    echo "       this reads the newest run on the repository, so if you have just" >&2
+    echo "       fixed billing, push any commit to produce a fresh run, or set" >&2
+    echo "       NOBODY_RELEASE_FORCE=1 to tag anyway." >&2
     exit 1
   fi
 fi
@@ -101,16 +103,18 @@ done
 
 if [ -z "$seen" ]; then
   echo "error: no release workflow run appeared within 2 minutes of the push." >&2
-  echo "       Actions is not starting jobs, so no release was created and" >&2
-  echo "       install.sh still serves the previous version." >&2
-  echo "       re-run with NOBODY_RELEASE_FORCE=1 NOBODY_RELEASE_WAIT=0 after" >&2
-  echo "       fixing billing, or delete the tag:  git push origin :${tag}" >&2
+  echo "       the tag may not match the workflow's 'v*' filter, or the workflow" >&2
+  echo "       is disabled. no release was created, and install.sh still serves" >&2
+  echo "       the previous version." >&2
+  echo "       recover with:  git push origin :${tag}" >&2
   exit 1
 fi
 
 if [ "$(run_steps "$seen")" = "0" ]; then
   echo "error: run ${seen} executed no steps, so Actions is not starting jobs." >&2
-  echo "       no release was created for ${tag}." >&2
+  echo "       no release was created for ${tag}, and install.sh still serves the" >&2
+  echo "       previous version. publish it by hand once the build is available:" >&2
+  echo "         gh release create ${tag} nobody-<triple>.tar.gz sha256sums.txt install.sh" >&2
   exit 1
 fi
 
