@@ -40,8 +40,9 @@ nobody list --json | history --json
 - Click, Escape, Enter or Space dismisses a notification. With an action button
   focused, Enter and Space activate that action instead.
 - Keeps 12 notifications, renders the 5 most recent. The center lists the
-  session's last 100 and is read-only: no actions, no replay. History is
-  in-memory only, so a restart starts empty.
+  session's last 100, searched by application, title or body as you type, and
+  is read-only: no actions, no replay. History is in-memory only, so a restart
+  starts empty.
 - Timeout `-1` is the server default (5s), `0` never expires, critical never
   expires. A `value` hint (int32, 0–100) draws a progress bar.
 - `x-dunst-stack-tag` and `x-canonical-private-synchronous` replace the previous

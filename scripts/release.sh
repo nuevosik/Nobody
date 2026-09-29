@@ -48,7 +48,8 @@ if [ "$has_gh" -eq 1 ] && [ "${NOBODY_RELEASE_FORCE:-0}" != "1" ]; then
   if [ -n "$probe" ] && [ "$(run_steps "$probe")" = "0" ]; then
     echo "error: the newest workflow run (${probe}) executed no steps, so GitHub" >&2
     echo "       never started the job. Tagging now would create no release." >&2
-    echo "       that is either the account billing lock or a broken workflow file;" >&2
+    echo "       that is either the account billing lock" >&2
+    echo "       (https://github.com/settings/billing) or a broken workflow file;" >&2
     echo "       inspect it with:  gh run view ${probe}" >&2
     echo "       this reads the newest run on the repository, so if you have just" >&2
     echo "       fixed billing, push any commit to produce a fresh run, or set" >&2
