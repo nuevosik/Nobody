@@ -73,9 +73,68 @@ pub(crate) fn is_critical(hints: &HashMap<String, OwnedValue>) -> bool {
     false
 }
 
+const HINT_PRIORITY: [&str; 8] = [
+    "image-data",
+    "image_data",
+    "image-path",
+    "image_path",
+    "desktop-entry",
+    "desktop_entry",
+    "urgency",
+    "value",
+];
+
+pub(crate) fn limit_hints(mut hints: HashMap<String, OwnedValue>) -> HashMap<String, OwnedValue> {
+    if hints.len() <= MAX_HINTS {
+        return hints;
+    }
+    let mut kept = HashMap::with_capacity(MAX_HINTS);
+    for key in HINT_PRIORITY {
+        if kept.len() == MAX_HINTS {
+            break;
+        }
+        if let Some(value) = hints.remove(key) {
+            kept.insert(key.to_string(), value);
+        }
+    }
+    if kept.len() < MAX_HINTS {
+        let mut rest: Vec<(String, OwnedValue)> = hints.into_iter().collect();
+        rest.sort_by(|a, b| a.0.cmp(&b.0));
+        kept.extend(rest.into_iter().take(MAX_HINTS - kept.len()));
+    }
+    kept
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limit_hints_keeps_the_keys_that_matter_and_is_deterministic() {
+        let mut hints = HashMap::new();
+        for i in 0..MAX_HINTS + 20 {
+            hints.insert(format!("filler-{i:03}"), OwnedValue::from(1u8));
+        }
+        hints.insert("image-data".into(), OwnedValue::from(2u8));
+        hints.insert("desktop-entry".into(), OwnedValue::from(3u8));
+        hints.insert("value".into(), OwnedValue::from(4u8));
+
+        let limited = limit_hints(hints.clone());
+        assert_eq!(limited.len(), MAX_HINTS);
+        for key in ["image-data", "desktop-entry", "value"] {
+            assert!(limited.contains_key(key), "{key} must survive truncation");
+        }
+
+        let again = limit_hints(hints.clone());
+        let mut first: Vec<_> = limited.keys().cloned().collect();
+        let mut second: Vec<_> = again.keys().cloned().collect();
+        first.sort();
+        second.sort();
+        assert_eq!(first, second, "the same input must keep the same keys");
+
+        let small = HashMap::from([("a".to_string(), OwnedValue::from(1u8))]);
+        assert_eq!(limit_hints(small.clone()), small);
+    }
 
     #[test]
     fn detects_critical_urgency() {

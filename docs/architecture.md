@@ -39,8 +39,10 @@ Guards in CI (must print nothing):
   interface (`/com/nobody/Control`) and holds the blocking client used by
   the CLI commands (no GUI init).
 - **infrastructure/icons** (`resolver.rs`, `lookup.rs`, `desktop.rs`,
-  `cache.rs`) — icon lookup scoped to known locations (name, hint,
-  desktop-entry).
+  `cache.rs`, `inline.rs`) — icon lookup scoped to known locations (name, hint,
+  desktop-entry), plus inline `image-data` pixels materialised into
+  `~/.cache/nobody/inline/` behind a count and byte cap. `infrastructure/cache_file.rs`
+  owns the shared atomic, symlink-resistant cache write.
 - **infrastructure/fullscreen** (`fullscreen.rs`) — Hyprland fullscreen
   detector: listens to `.socket2.sock` events, re-queries `hyprctl` on relevant
   changes (1 s poll fallback when the socket is unavailable, 30 s safety

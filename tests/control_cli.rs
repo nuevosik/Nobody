@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::zvariant::{Array, OwnedValue, Structure, Value};
 
 use nobody::application::{cli, commands, config::Config};
 use nobody::domain::close::CloseReason;
@@ -30,24 +30,34 @@ struct IsolatedBus {
     daemon: Child,
 }
 
-struct SessionBusEnvGuard(Option<std::ffi::OsString>);
-
 impl SessionBusEnvGuard {
     fn set(address: &str) -> Self {
         let previous = std::env::var_os("DBUS_SESSION_BUS_ADDRESS");
+        let cache = std::env::var_os("XDG_CACHE_HOME");
+        let base = std::env::temp_dir().join(format!("nobody-test-cache-{}", std::process::id()));
         unsafe {
             std::env::set_var("DBUS_SESSION_BUS_ADDRESS", address);
+            std::env::set_var("XDG_CACHE_HOME", base);
         }
-        Self(previous)
+        Self { bus: previous, cache }
     }
+}
+
+struct SessionBusEnvGuard {
+    bus: Option<std::ffi::OsString>,
+    cache: Option<std::ffi::OsString>,
 }
 
 impl Drop for SessionBusEnvGuard {
     fn drop(&mut self) {
         unsafe {
-            match self.0.take() {
+            match self.bus.take() {
                 Some(value) => std::env::set_var("DBUS_SESSION_BUS_ADDRESS", value),
                 None => std::env::remove_var("DBUS_SESSION_BUS_ADDRESS"),
+            }
+            match self.cache.take() {
+                Some(value) => std::env::set_var("XDG_CACHE_HOME", value),
+                None => std::env::remove_var("XDG_CACHE_HOME"),
             }
         }
     }
@@ -710,6 +720,65 @@ fn icon_lookup_resumes_after_all_workers_were_busy() {
         queue.history_snapshot().iter().find(|entry| entry.notice.id == id).unwrap().notice.icon,
         expected
     );
+}
+
+#[test]
+fn notify_with_image_data_materialises_the_icon_over_the_bus() {
+    let _env_lock = session_bus_env_lock().lock().unwrap_or_else(|error| error.into_inner());
+    let bus = IsolatedBus::start();
+    let _env = SessionBusEnvGuard::set(&bus.address);
+    let queue = Queue::new();
+    let _server = server(&bus, queue.clone());
+    let connection = client(&bus);
+    let proxy = zbus::blocking::Proxy::new(
+        &connection,
+        SERVICE,
+        NOTIFICATION_PATH,
+        "org.freedesktop.Notifications",
+    )
+    .expect("notification proxy");
+
+    let data: Vec<u8> = std::iter::repeat_n([0xffu8, 0x00, 0x00, 0xff], 16).flatten().collect();
+    let array = Array::from(&data[..]);
+    let structure = Structure::from((4i32, 4i32, 16i32, true, 8i32, 4i32, array));
+    let hints = HashMap::from([(
+        "image-data".to_string(),
+        OwnedValue::try_from(Value::Structure(structure)).expect("owned value"),
+    )]);
+
+    let id: u32 = proxy
+        .call(
+            "Notify",
+            &("Inline", 0_u32, "", "com icone inline", "", Vec::<String>::new(), hints, 0_i32),
+        )
+        .expect("Notify with image-data must respond");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let notice = queue.snapshot().into_iter().find(|n| n.id == id).expect("notice");
+        if let Some(icon) = notice.icon {
+            assert!(
+                icon.to_string_lossy().contains("nobody/inline"),
+                "must land in the inline cache, got {icon:?}"
+            );
+            let bytes = std::fs::read(&icon).expect("the cache file must be readable");
+            assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "must be a real PNG");
+            assert_eq!(
+                queue
+                    .history_snapshot()
+                    .iter()
+                    .find(|entry| entry.notice.id == id)
+                    .expect("history entry")
+                    .notice
+                    .icon,
+                Some(icon),
+                "the history must carry the same icon"
+            );
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the inline icon never reached the queue");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
