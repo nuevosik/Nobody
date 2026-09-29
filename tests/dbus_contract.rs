@@ -433,6 +433,31 @@ fn image_data_hint_materialises_a_png_and_reuses_it() {
 }
 
 #[test]
+fn image_path_outranks_image_data() {
+    let _guard = infra_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let base = std::env::temp_dir().join(uniq("precedence"));
+    std::fs::create_dir_all(&base).unwrap();
+    let _xdg = XdgGuard::set(&base);
+
+    let name = format!("{}-icon", uniq("prec"));
+    let dir = base.join("icons/hicolor/48x48/apps");
+    std::fs::create_dir_all(&dir).unwrap();
+    write_png(&dir.join(format!("{name}.png")));
+
+    let mut hints = image_data_hint(4, 4, 16, true, 8, 4);
+    hints.insert("image-path".to_string(), str_hint(&name));
+
+    let path = resolve_notice_icon("", "", &hints).expect("one of the two must resolve");
+    assert_eq!(path, dir.join(format!("{name}.png")), "image-path must win");
+    assert!(
+        !path.to_string_lossy().contains("inline"),
+        "the inline payload must not win, got {path:?}"
+    );
+
+    std::fs::remove_dir_all(base).ok();
+}
+
+#[test]
 fn malformed_image_data_falls_through_instead_of_resolving() {
     let _guard = infra_lock().lock().unwrap_or_else(|e| e.into_inner());
     let base = std::env::temp_dir().join(uniq("inline-bad"));
