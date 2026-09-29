@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
-use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::Read;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use zbus::zvariant::OwnedValue;
+
+use crate::infrastructure::cache_file;
 
 const SPOTIFY_BUS: &str = "org.mpris.MediaPlayer2.spotify";
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
@@ -17,7 +17,6 @@ const ART_URL_KEY: &str = "mpris:artUrl";
 const MPRIS_TIMEOUT: Duration = Duration::from_secs(2);
 const CURL_TIMEOUT_S: &str = "10";
 const MAX_BYTES: usize = 5 * 1024 * 1024;
-static NEXT_TMP_ID: AtomicU64 = AtomicU64::new(1);
 
 pub fn is_spotify(app: &str, hints: &HashMap<String, OwnedValue>) -> bool {
     if app.trim().eq_ignore_ascii_case("spotify") {
@@ -111,23 +110,14 @@ fn file_url_to_path(url: &str) -> Option<PathBuf> {
     Some(PathBuf::from(stripped))
 }
 
-fn covers_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    let dir = base.join("nobody").join("covers");
-    std::fs::create_dir_all(&dir).ok()?;
-    Some(dir)
-}
-
 fn cache_path_for(url: &str, ext: &str) -> Option<PathBuf> {
     let mut hasher = DefaultHasher::new();
     url.hash(&mut hasher);
-    Some(covers_dir()?.join(format!("{:016x}.{ext}", hasher.finish())))
+    Some(cache_file::cache_dir("covers")?.join(format!("{:016x}.{ext}", hasher.finish())))
 }
 
 fn cached_download(url: &str) -> Option<PathBuf> {
-    if let Some(dir) = covers_dir() {
+    if let Some(dir) = cache_file::cache_dir("covers") {
         let mut hasher = DefaultHasher::new();
         url.hash(&mut hasher);
         let stem = format!("{:016x}", hasher.finish());
@@ -160,29 +150,8 @@ fn cached_download(url: &str) -> Option<PathBuf> {
     }
     let ext = image::guess_format(&out).ok()?.extensions_str().first()?;
     let dest = cache_path_for(url, ext)?;
-    write_cache(&dest, &out)?;
+    cache_file::write_atomic(&dest, &out)?;
     Some(dest)
-}
-
-fn write_cache(dest: &Path, bytes: &[u8]) -> Option<()> {
-    for _ in 0..8 {
-        let tmp = dest.with_extension(format!(
-            "tmp-{}-{}",
-            std::process::id(),
-            NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        let Ok(mut file) = File::create_new(&tmp) else {
-            continue;
-        };
-        let written = file.write_all(bytes).is_ok();
-        drop(file);
-        if written && std::fs::rename(&tmp, dest).is_ok() {
-            return Some(());
-        }
-        std::fs::remove_file(&tmp).ok();
-        return None;
-    }
-    None
 }
 
 #[cfg(test)]
@@ -277,29 +246,5 @@ mod tests {
         assert!(!allowed_art_host("https://evilscdn.co/x"));
         assert!(!allowed_art_host("file:///etc/passwd"));
         assert!(!allowed_art_host("ftp://i.scdn.co/x"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn cache_write_replaces_symlink_without_touching_its_target() {
-        use std::os::unix::fs::symlink;
-
-        let dir = std::env::temp_dir().join(format!(
-            "nobody-cache-test-{}-{}",
-            std::process::id(),
-            NEXT_TMP_ID.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&dir).unwrap();
-        let target = dir.join("target");
-        let dest = dir.join("cover.jpg");
-        std::fs::write(&target, b"keep").unwrap();
-        symlink(&target, &dest).unwrap();
-
-        assert_eq!(write_cache(&dest, b"image"), Some(()));
-        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
-        assert_eq!(std::fs::read(&dest).unwrap(), b"image");
-        assert!(std::fs::symlink_metadata(&dest).unwrap().file_type().is_file());
-
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -56,6 +56,9 @@ nobody list --json | history --json
   syntax, and never start the GUI.
 - Spotify notifications carry the current album cover (MPRIS + `curl`), cached
   under `~/.cache/nobody/covers/`.
+- Icons come from `image-path`, the `app_icon` argument, `desktop-entry`, or
+  inline `image-data` pixels — what browsers and Electron apps send — which are
+  written as PNGs under `~/.cache/nobody/inline/`.
 
 Browsers reach Nobody through the standard D-Bus interface, so they need
 `body` and `actions` advertised — which they are. A Flatpak or Snap browser may

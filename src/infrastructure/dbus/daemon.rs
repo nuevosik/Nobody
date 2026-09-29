@@ -11,8 +11,8 @@ use crate::domain::notice::Notice;
 use crate::domain::queue::Queue;
 use crate::infrastructure::dbus::markup::strip_markup;
 use crate::infrastructure::dbus::validation::{
-    MAX_BODY_LEN, MAX_HINTS, MAX_ICON_LEN, MAX_MARKUP_INPUT_LEN, MAX_SUMMARY_LEN,
-    actions as parse_actions, desktop_entry, is_critical, progress, stack_tag, truncate,
+    MAX_BODY_LEN, MAX_ICON_LEN, MAX_MARKUP_INPUT_LEN, MAX_SUMMARY_LEN, actions as parse_actions,
+    desktop_entry, is_critical, limit_hints, progress, stack_tag, truncate,
 };
 use crate::infrastructure::icons::resolve_notice_icon;
 
@@ -129,11 +129,7 @@ impl NotificationDaemon {
         let progress = progress(&hints);
         let is_crit = is_critical(&hints);
         let desktop_entry = desktop_entry(&hints);
-        let hints_limited: HashMap<String, OwnedValue> = if hints.len() > MAX_HINTS {
-            hints.into_iter().take(MAX_HINTS).collect()
-        } else {
-            hints
-        };
+        let hints_limited = limit_hints(hints);
         let app_icon_trunc = truncate(app_icon, MAX_ICON_LEN);
         let icon_app = app.clone();
 

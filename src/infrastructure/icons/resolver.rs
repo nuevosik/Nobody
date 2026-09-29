@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use zbus::zvariant::OwnedValue;
 
 use super::desktop::icon_from_desktop;
+use super::inline;
 use super::lookup::resolve_named_icon;
 
 pub fn resolve_notice_icon(
@@ -15,6 +16,9 @@ pub fn resolve_notice_icon(
         if let Some(path) = hint_string(hints, key).and_then(|p| resolve_named_icon(&p)) {
             return Some(path);
         }
+    }
+    if let Some(path) = inline::inline_icon(hints) {
+        return Some(path);
     }
     if let Some(path) = resolve_named_icon(app_icon) {
         return Some(path);

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::zvariant::{Array, OwnedValue, Structure, Value};
 
 use nobody::application::{commands, config::Config, policy};
 use nobody::domain::notice::Notice;
@@ -94,6 +94,7 @@ fn str_hint(value: &str) -> OwnedValue {
 struct XdgGuard {
     home: Option<std::ffi::OsString>,
     dirs: Option<std::ffi::OsString>,
+    cache: Option<std::ffi::OsString>,
 }
 
 impl XdgGuard {
@@ -101,10 +102,12 @@ impl XdgGuard {
         let guard = Self {
             home: std::env::var_os("XDG_DATA_HOME"),
             dirs: std::env::var_os("XDG_DATA_DIRS"),
+            cache: std::env::var_os("XDG_CACHE_HOME"),
         };
         unsafe {
             std::env::set_var("XDG_DATA_HOME", base);
             std::env::set_var("XDG_DATA_DIRS", "/nonexistent-nobody-r2-xyz");
+            std::env::set_var("XDG_CACHE_HOME", base.join("cache"));
         }
         guard
     }
@@ -120,6 +123,10 @@ impl Drop for XdgGuard {
             match &self.dirs {
                 Some(v) => std::env::set_var("XDG_DATA_DIRS", v),
                 None => std::env::remove_var("XDG_DATA_DIRS"),
+            }
+            match &self.cache {
+                Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
+                None => std::env::remove_var("XDG_CACHE_HOME"),
             }
         }
     }
@@ -369,4 +376,78 @@ fn notify_pipeline_expire_runs_before_push() {
         },
     );
     assert_eq!(q.snapshot().len(), 1);
+}
+
+fn image_data_hint(
+    width: i32,
+    height: i32,
+    rowstride: i32,
+    has_alpha: bool,
+    bits_per_sample: i32,
+    channels: i32,
+) -> HashMap<String, OwnedValue> {
+    let mut data = vec![0u8; (rowstride.max(1) as usize) * (height.max(1) as usize)];
+    for pixel in data.chunks_mut(4) {
+        pixel[0] = 0x40;
+        pixel[1] = 0x80;
+        pixel[2] = 0xc0;
+        if pixel.len() == 4 {
+            pixel[3] = 0xff;
+        }
+    }
+    let structure = Structure::from((
+        width,
+        height,
+        rowstride,
+        has_alpha,
+        bits_per_sample,
+        channels,
+        Array::from(&data[..]),
+    ));
+    HashMap::from([(
+        "image-data".to_string(),
+        OwnedValue::try_from(Value::Structure(structure)).expect("owned value"),
+    )])
+}
+
+#[test]
+fn image_data_hint_materialises_a_png_and_reuses_it() {
+    let _guard = infra_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let base = std::env::temp_dir().join(uniq("inline-home"));
+    std::fs::create_dir_all(&base).unwrap();
+    let _xdg = XdgGuard::set(&base);
+
+    let hints = image_data_hint(4, 4, 16, true, 8, 4);
+    let path = resolve_notice_icon("firefox", "Firefox", &hints).expect("inline icon");
+    assert!(
+        path.to_string_lossy().contains("nobody/inline"),
+        "must land in the inline cache, got {path:?}"
+    );
+    let bytes = std::fs::read(&path).expect("the cache file must be readable");
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "must be a real PNG");
+
+    let again = resolve_notice_icon("firefox", "Firefox", &hints).expect("inline icon");
+    assert_eq!(again, path, "the same payload must reuse the same file");
+
+    std::fs::remove_dir_all(base).ok();
+}
+
+#[test]
+fn malformed_image_data_falls_through_instead_of_resolving() {
+    let _guard = infra_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let base = std::env::temp_dir().join(uniq("inline-bad"));
+    std::fs::create_dir_all(&base).unwrap();
+    let _xdg = XdgGuard::set(&base);
+
+    for (bits, channels, has_alpha, rowstride) in
+        [(16, 4, true, 16), (8, 4, false, 16), (8, 3, true, 16), (8, 4, true, 8)]
+    {
+        let hints = image_data_hint(4, 4, rowstride, has_alpha, bits, channels);
+        assert!(
+            resolve_notice_icon("/nonexistent-icon-xyz", "NonexistentAppXyz", &hints).is_none(),
+            "bits={bits} channels={channels} alpha={has_alpha} rowstride={rowstride} must not resolve"
+        );
+    }
+
+    std::fs::remove_dir_all(base).ok();
 }
