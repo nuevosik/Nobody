@@ -15,7 +15,15 @@ pub fn append_query(query: &mut String, text: &str) -> bool {
 }
 
 pub fn dnd_button_label(manual: bool) -> &'static str {
-    if manual { "Não Perturbe: on" } else { "Não Perturbe: off" }
+    if manual { "Não Perturbe: ligado" } else { "Não Perturbe: desligado" }
+}
+
+pub fn history_header(filtered: usize, total: usize, query: &str) -> String {
+    if query.trim().is_empty() {
+        format!("Central ({total})")
+    } else {
+        format!("Central ({filtered}/{total})")
+    }
 }
 
 pub fn fullscreen_note(manual: bool, auto: bool) -> Option<&'static str> {
@@ -28,8 +36,12 @@ pub fn format_age(now_ms: u128, arrived_at_ms: u128) -> String {
         "agora".to_string()
     } else if elapsed_s < 60 {
         format!("há {elapsed_s}s")
-    } else {
+    } else if elapsed_s < 60 * 60 {
         format!("há {}min", elapsed_s / 60)
+    } else if elapsed_s < 24 * 60 * 60 {
+        format!("há {}h", elapsed_s / (60 * 60))
+    } else {
+        format!("há {}d", elapsed_s / (24 * 60 * 60))
     }
 }
 
@@ -222,6 +234,10 @@ mod tests {
         assert_eq!(format_age(15_000, 10_000), "há 5s");
         assert_eq!(format_age(69_999, 10_000), "há 59s");
         assert_eq!(format_age(70_000, 10_000), "há 1min");
+        assert_eq!(format_age(3_550_000, 10_000), "há 59min");
+        assert_eq!(format_age(3_610_000, 10_000), "há 1h");
+        assert_eq!(format_age(82_810_000, 10_000), "há 23h");
+        assert_eq!(format_age(86_410_000, 10_000), "há 1d");
         assert_eq!(format_age(5_000, 10_000), "agora");
     }
 
@@ -367,10 +383,17 @@ mod tests {
 
     #[test]
     fn dnd_labels_and_fullscreen_note() {
-        assert_eq!(dnd_button_label(true), "Não Perturbe: on");
-        assert_eq!(dnd_button_label(false), "Não Perturbe: off");
+        assert_eq!(dnd_button_label(true), "Não Perturbe: ligado");
+        assert_eq!(dnd_button_label(false), "Não Perturbe: desligado");
         assert_eq!(fullscreen_note(false, true), Some("Silêncio ativo por tela cheia"));
         assert_eq!(fullscreen_note(true, true), None);
         assert_eq!(fullscreen_note(false, false), None);
+    }
+
+    #[test]
+    fn header_shows_filtered_over_total_only_when_searching() {
+        assert_eq!(history_header(3, 12, ""), "Central (12)");
+        assert_eq!(history_header(3, 12, "   "), "Central (12)");
+        assert_eq!(history_header(3, 12, "fire"), "Central (3/12)");
     }
 }

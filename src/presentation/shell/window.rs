@@ -13,8 +13,8 @@ use crate::application::{clock, commands};
 use crate::domain::notice::Notice;
 use crate::domain::queue::Queue;
 use crate::presentation::theme::{
-    ACCENT, CARD_GAP, CARD_H, CARD_R, CHIP, FONT, INK, MARGIN, MUTED, POPUP_W, QUIET_BADGE, TEXT,
-    TEXT_BODY, TEXT_TITLE, fade,
+    ACCENT, CARD_GAP, CARD_H, CARD_R, CHIP, INK, MARGIN, MUTED, POPUP_W, QUIET_BADGE, TEXT,
+    TEXT_BODY, TEXT_TITLE, app_font, fade,
 };
 
 use super::{anim, center, feed, geometry, popup};
@@ -30,6 +30,7 @@ pub struct NotificationStack {
     exiting: Vec<feed::Exiting>,
     queue: Queue,
     max_visible: usize,
+    left: bool,
     quiet: bool,
     center_open: bool,
     center_query: String,
@@ -42,6 +43,7 @@ pub struct NotificationStack {
     expanded: Option<String>,
     last_window_h: Option<f32>,
     fullscreen_hidden: bool,
+    last_age_tick_ms: u128,
     glide: GlideState,
 }
 
@@ -58,6 +60,7 @@ pub(crate) struct GlideState {
     smooth_y: HashMap<u32, f32>,
     target_y: HashMap<u32, f32>,
     shown_at: HashMap<u32, u128>,
+    visible_y: HashMap<u32, f32>,
     last_expanded: Option<String>,
 }
 
@@ -137,6 +140,11 @@ impl GlideState {
             .map(|(i, notice)| self.smooth_y.get(&notice.id).copied().unwrap_or(y_map[i]))
             .collect();
         let input_regions = geometry::deck_input_regions(&deck_list, &shown, &positions);
+        self.visible_y = shown
+            .iter()
+            .flat_map(|slot| slot.indices.iter())
+            .map(|&idx| (notices[idx].id, positions[idx]))
+            .collect();
 
         Layout { deck_list, shown, positions, input_regions, total_h }
     }
@@ -158,7 +166,7 @@ pub(crate) fn hover_expand(current: Option<&str>, app: &str, hovered: bool) -> O
 }
 
 impl NotificationStack {
-    pub fn new(cx: &mut Context<Self>, queue: Queue, max_visible: usize) -> Self {
+    pub fn new(cx: &mut Context<Self>, queue: Queue, max_visible: usize, left: bool) -> Self {
         spawn_anim_ticker(cx);
         spawn_feed_sync(queue.clone(), cx);
 
@@ -167,6 +175,7 @@ impl NotificationStack {
             exiting: Vec::new(),
             queue,
             max_visible,
+            left,
             quiet: false,
             center_open: false,
             center_query: String::new(),
@@ -179,6 +188,7 @@ impl NotificationStack {
             expanded: None,
             last_window_h: None,
             fullscreen_hidden: false,
+            last_age_tick_ms: 0,
             glide: GlideState::default(),
         }
     }
@@ -216,39 +226,46 @@ impl NotificationStack {
         let auto = commands::quiet_mode(&self.queue);
         let now = clock::now_ms();
         let query_text = self.center_query.clone();
-        let empty_query = query_text.trim().is_empty();
+        let show_placeholder = query_text.is_empty();
+        let search_focused = self.search_focus.is_focused(window);
+        let caret = || div().w(px(1.)).h(px(12.)).bg(fade(ACCENT, 1.));
 
         let root = div()
             .id("center")
             .tab_group()
             .size_full()
-            .font_family(FONT)
+            .font(app_font())
             .text_size(px(11.))
             .relative()
             .p(px(MARGIN))
-            .pl(px(MARGIN + CARD_R))
+            .when(self.left, |el| el.pr(px(MARGIN + CARD_R)))
+            .when(!self.left, |el| el.pl(px(MARGIN + CARD_R)))
             .child(
-                gpui::canvas(
-                    |_, _, _| (),
-                    |bounds, _, window, _| {
+                gpui::canvas(|_, _, _| (), {
+                    let left = self.left;
+                    move |bounds, _, window, _| {
                         let origin = bounds.origin;
-                        let w = bounds.size.width;
-                        let h = bounds.size.height;
-                        let r = px(CARD_R);
                         let mut path = gpui::PathBuilder::fill();
-                        path.move_to(origin);
-                        path.line_to(origin + point(w, px(0.)));
-                        path.line_to(origin + point(w, h));
-                        path.line_to(origin + point(r * 2., h));
-                        path.curve_to(origin + point(r, h - r), origin + point(r, h));
-                        path.line_to(origin + point(r, r));
-                        path.curve_to(origin, origin + point(r, px(0.)));
+                        for cmd in panel_outline(
+                            f32::from(bounds.size.width),
+                            f32::from(bounds.size.height),
+                            left,
+                        ) {
+                            match cmd {
+                                PanelCmd::Move(x, y) => path.move_to(origin + point(px(x), px(y))),
+                                PanelCmd::Line(x, y) => path.line_to(origin + point(px(x), px(y))),
+                                PanelCmd::Quad(to_x, to_y, ctrl_x, ctrl_y) => path.curve_to(
+                                    origin + point(px(to_x), px(to_y)),
+                                    origin + point(px(ctrl_x), px(ctrl_y)),
+                                ),
+                            }
+                        }
                         path.close();
                         if let Ok(outline) = path.build() {
                             window.paint_path(outline, fade(INK, 0.92));
                         }
-                    },
-                )
+                    }
+                })
                 .absolute()
                 .top_0()
                 .left_0()
@@ -284,10 +301,9 @@ impl NotificationStack {
                     .items_center()
                     .justify_between()
                     .child(
-                        div()
-                            .text_size(px(TEXT_TITLE))
-                            .text_color(fade(TEXT, 1.))
-                            .child(format!("Central ({})", entries.len())),
+                        div().text_size(px(TEXT_TITLE)).text_color(fade(TEXT, 1.)).child(
+                            center::history_header(filtered.len(), entries.len(), &query_text),
+                        ),
                     )
                     .child(
                         div()
@@ -297,12 +313,14 @@ impl NotificationStack {
                             .aria_label("Fechar central")
                             .aria_keyshortcuts("Escape")
                             .cursor_pointer()
-                            .px(px(8.))
-                            .py(px(2.))
+                            .px(px(6.))
+                            .py(px(0.))
+                            .border_2()
+                            .border_color(fade(INK, 0.))
                             .rounded(px(8.))
                             .bg(fade(CHIP, 1.))
                             .text_color(fade(TEXT, 0.9))
-                            .focus_visible(|s| s.border_2().border_color(fade(ACCENT, 1.)))
+                            .focus_visible(|s| s.border_color(fade(ACCENT, 1.)))
                             .child("Fechar")
                             .on_click(cx.listener(|stack, _, _, cx| {
                                 stack.close_center();
@@ -334,12 +352,14 @@ impl NotificationStack {
                             .role(Role::Button)
                             .aria_label("Alternar Não Perturbe manual")
                             .cursor_pointer()
-                            .px(px(8.))
-                            .py(px(2.))
+                            .px(px(6.))
+                            .py(px(0.))
+                            .border_2()
+                            .border_color(fade(INK, 0.))
                             .rounded(px(8.))
                             .bg(fade(CHIP, 1.))
                             .text_color(fade(TEXT, 0.9))
-                            .focus_visible(|s| s.border_2().border_color(fade(ACCENT, 1.)))
+                            .focus_visible(|s| s.border_color(fade(ACCENT, 1.)))
                             .child(center::dnd_button_label(manual))
                             .on_click(cx.listener(|stack, _, _, cx| {
                                 commands::toggle_manual_quiet(&stack.queue);
@@ -358,37 +378,42 @@ impl NotificationStack {
                                 },
                             )),
                     )
-                    .child(
-                        div()
-                            .id("center-clear")
-                            .tab_index(2)
-                            .role(Role::Button)
-                            .aria_label("Limpar histórico")
-                            .cursor_pointer()
-                            .px(px(8.))
-                            .py(px(2.))
-                            .rounded(px(8.))
-                            .bg(fade(CHIP, 1.))
-                            .text_color(fade(TEXT, 0.9))
-                            .focus_visible(|s| s.border_2().border_color(fade(ACCENT, 1.)))
-                            .child("Limpar histórico")
-                            .on_click(cx.listener(|stack, _, _, cx| {
-                                commands::clear_history(&stack.queue);
-                                cx.notify();
-                            }))
-                            .on_key_down(cx.listener(
-                                |stack, event: &gpui::KeyDownEvent, _, cx| {
-                                    if event.keystroke.modifiers.modified() {
-                                        return;
-                                    }
-                                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                        commands::clear_history(&stack.queue);
-                                        cx.stop_propagation();
-                                        cx.notify();
-                                    }
-                                },
-                            )),
-                    ),
+                    .when(!entries.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .id("center-clear")
+                                .tab_index(2)
+                                .role(Role::Button)
+                                .aria_label("Limpar histórico")
+                                .cursor_pointer()
+                                .px(px(6.))
+                                .py(px(0.))
+                                .border_2()
+                                .border_color(fade(INK, 0.))
+                                .rounded(px(8.))
+                                .bg(fade(CHIP, 1.))
+                                .text_color(fade(TEXT, 0.9))
+                                .focus_visible(|s| s.border_color(fade(ACCENT, 1.)))
+                                .child("Limpar histórico")
+                                .on_click(cx.listener(|stack, _, _, cx| {
+                                    commands::clear_history(&stack.queue);
+                                    cx.notify();
+                                }))
+                                .on_key_down(cx.listener(
+                                    |stack, event: &gpui::KeyDownEvent, _, cx| {
+                                        if event.keystroke.modifiers.modified() {
+                                            return;
+                                        }
+                                        if matches!(event.keystroke.key.as_str(), "enter" | "space")
+                                        {
+                                            commands::clear_history(&stack.queue);
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        }
+                                    },
+                                )),
+                        )
+                    }),
             )
             .when(center::fullscreen_note(manual, auto).is_some(), |el| {
                 el.child(
@@ -408,13 +433,22 @@ impl NotificationStack {
                     .py(px(4.))
                     .rounded(px(8.))
                     .border_1()
-                    .border_color(gpui::Rgba { r: 1., g: 1., b: 1., a: 0.15 })
-                    .text_color(if empty_query { fade(MUTED, 1.) } else { fade(TEXT, 1.) })
-                    .child(if empty_query {
+                    .border_color(if search_focused {
+                        fade(ACCENT, 0.6)
+                    } else {
+                        gpui::Rgba { r: 1., g: 1., b: 1., a: 0.15 }
+                    })
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .text_color(if show_placeholder { fade(MUTED, 1.) } else { fade(TEXT, 1.) })
+                    .when(search_focused && show_placeholder, |el| el.child(caret()))
+                    .child(if show_placeholder {
                         "Buscar por app, título ou corpo".to_string()
                     } else {
                         query_text.clone()
                     })
+                    .when(search_focused && !show_placeholder, |el| el.child(caret()))
                     .on_key_down(cx.listener(
                         move |stack, event: &gpui::KeyDownEvent, window, cx| {
                             let m = &event.keystroke.modifiers;
@@ -539,7 +573,7 @@ impl NotificationStack {
                         .px(px(8.))
                         .py(px(6.))
                         .rounded(px(10.))
-                        .bg(fade(INK, 0.78))
+                        .bg(fade(TEXT, 0.05))
                         .child(popup::badge(n.icon.as_ref(), &n.app, cx))
                         .child(
                             div()
@@ -559,6 +593,9 @@ impl NotificationStack {
                                     div()
                                         .text_size(px(TEXT_TITLE))
                                         .text_color(fade(TEXT, 1.))
+                                        .whitespace_nowrap()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
                                         .child(n.summary.clone()),
                                 )
                                 .when(!n.body.is_empty(), |el| {
@@ -566,6 +603,8 @@ impl NotificationStack {
                                         div()
                                             .text_size(px(TEXT_BODY))
                                             .text_color(fade(MUTED, 1.))
+                                            .overflow_hidden()
+                                            .line_clamp(2)
                                             .child(n.body.clone()),
                                     )
                                 }),
@@ -766,7 +805,13 @@ fn spawn_anim_ticker(cx: &mut Context<NotificationStack>) {
                 let entering = stack.glide.is_entering(clock::now_ms());
                 let exiting = !stack.exiting.is_empty();
                 let settling = stack.glide.is_settling();
-                entering || exiting || settling
+                let now = clock::now_ms();
+                let mut age_tick = false;
+                if stack.center_open && now.saturating_sub(stack.last_age_tick_ms) >= 1000 {
+                    stack.last_age_tick_ms = now;
+                    age_tick = !commands::history(&stack.queue).is_empty();
+                }
+                entering || exiting || settling || age_tick
             }) else {
                 break;
             };
@@ -793,8 +838,13 @@ fn spawn_feed_sync(queue: Queue, cx: &mut Context<NotificationStack>) {
             if this
                 .update(cx, |stack, cx| {
                     let quiet = commands::effective_quiet(&stack.queue);
-                    let changed =
-                        feed::sync_snapshot(&mut stack.stack, &mut stack.exiting, snapshot, quiet);
+                    let changed = feed::sync_snapshot(
+                        &mut stack.stack,
+                        &mut stack.exiting,
+                        &stack.glide.visible_y,
+                        snapshot,
+                        quiet,
+                    );
                     let flipped = quiet != stack.quiet;
                     stack.quiet = quiet;
                     let manual = commands::manual_quiet(&stack.queue);
@@ -829,6 +879,7 @@ fn spawn_feed_sync(queue: Queue, cx: &mut Context<NotificationStack>) {
 
 impl gpui::Render for NotificationStack {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
+        let left = self.left;
         if commands::quiet_mode(&self.queue) {
             if !self.fullscreen_hidden {
                 window.resize(Size::new(px(1.), px(1.)));
@@ -856,10 +907,7 @@ impl gpui::Render for NotificationStack {
                 .relative()
                 .when(!self.stack.notices.is_empty(), |el| {
                     el.child(
-                        div()
-                            .absolute()
-                            .top(px(MARGIN))
-                            .right(px(MARGIN))
+                        edge(div().absolute().top(px(MARGIN)), left, MARGIN)
                             .child(popup::nobody_badge()),
                     )
                 })
@@ -908,7 +956,7 @@ impl gpui::Render for NotificationStack {
             .tab_stop(false)
             .size_full()
             .relative()
-            .font_family(FONT)
+            .font(app_font())
             .text_size(px(11.))
             .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
                 let modifiers = &event.keystroke.modifiers;
@@ -957,11 +1005,8 @@ impl gpui::Render for NotificationStack {
                     let deck = &deck_list[s.deck];
                     let first_y = f32::from(input_regions[k].origin.y);
                     let expand_app = deck.app.clone();
-                    let mut container = div()
+                    let mut container = edge(div().absolute().top(px(first_y)), left, MARGIN)
                         .id(format!("deck-{}", deck.app))
-                        .absolute()
-                        .top(px(first_y))
-                        .right(px(MARGIN))
                         .w(px(POPUP_W))
                         .h(input_regions[k].size.height)
                         .on_hover(cx.listener(move |stack, hovered: &bool, _, cx| {
@@ -982,13 +1027,13 @@ impl gpui::Render for NotificationStack {
                         let t = anim::enter_progress(shown_since);
                         let slide = if reduced { 0. } else { (1. - t) * (POPUP_W + MARGIN) };
                         if hidden > 0 {
-                            container = container.child(ghost_card(y + 5., 8., slide));
+                            container = container.child(ghost_card(y + 5., 8., slide, left));
                             if hidden > 1 {
-                                container = container.child(ghost_card(y + 10., 16., slide));
+                                container = container.child(ghost_card(y + 10., 16., slide, left));
                             }
                         }
                         let base_opacity =
-                            if slot == 0 { 1. } else { (1. - slot as f32 * 0.14).clamp(0.55, 1.) };
+                            if slot == 0 { 1. } else { (1. - slot as f32 * 0.07).clamp(0.8, 1.) };
                         let opacity = t * base_opacity;
                         let notice_id = notice.id;
                         let card_focus = window
@@ -1005,16 +1050,13 @@ impl gpui::Render for NotificationStack {
                             self.expanded = Some(deck.app.clone());
                             cx.notify();
                         }
-                        let mut card = div()
+                        let mut card = edge(div().absolute().top(px(y)), left, -slide)
                             .id(("notif", notice_id))
-                            .absolute()
-                            .top(px(y))
-                            .right(px(-slide))
                             .w(px(POPUP_W))
                             .min_h(px(card_h))
                             .rounded(px(CARD_R))
-                            .border_1()
-                            .border_color(gpui::Rgba { r: 1., g: 1., b: 1., a: 0.1 })
+                            .border_2()
+                            .border_color(gpui::Rgba { r: 1., g: 1., b: 1., a: 0.05 })
                             .bg(fade(INK, 0.78))
                             .shadow_lg()
                             .overflow_hidden()
@@ -1024,7 +1066,7 @@ impl gpui::Render for NotificationStack {
                             .role(gpui::accesskit::Role::Button)
                             .aria_label(popup::a11y_label(notice))
                             .aria_keyshortcuts("Enter Space Escape")
-                            .focus_visible(|s| s.border_2().border_color(fade(ACCENT, 1.)))
+                            .focus_visible(|s| s.border_color(fade(ACCENT, 1.)))
                             .active(|s| s.opacity(0.96))
                             .on_click(cx.listener(move |stack, _, _, cx| {
                                 stack.dismiss(notice_id);
@@ -1106,17 +1148,17 @@ impl gpui::Render for NotificationStack {
                                             .aria_label(label.clone())
                                             .aria_keyshortcuts("Enter Space")
                                             .cursor_pointer()
-                                            .px(px(8.))
-                                            .py(px(4.))
+                                            .px(px(6.))
+                                            .py(px(2.))
+                                            .border_2()
+                                            .border_color(fade(INK, 0.))
                                             .rounded(px(6.))
                                             .bg(fade(CHIP, 1.))
                                             .text_color(fade(TEXT, 0.95))
                                             .flex_shrink_0()
                                             .max_w(px(150.))
                                             .truncate()
-                                            .focus_visible(|s| {
-                                                s.border_2().border_color(fade(ACCENT, 1.))
-                                            })
+                                            .focus_visible(|s| s.border_color(fade(ACCENT, 1.)))
                                             .child(label)
                                             .on_click(cx.listener(move |stack, _, _, cx| {
                                                 cx.stop_propagation();
@@ -1167,16 +1209,13 @@ impl gpui::Render for NotificationStack {
                         let y = ex.y;
                         let slide_out = if reduced { 0. } else { t * (POPUP_W + MARGIN) };
                         let opacity = 1. - t;
-                        div()
+                        edge(div().absolute().top(px(y)), left, MARGIN - slide_out)
                             .id(("exiting", ex.notice.id))
-                            .absolute()
-                            .top(px(y))
-                            .right(px(MARGIN - slide_out))
                             .w(px(POPUP_W))
                             .min_h(px(card_h))
                             .rounded(px(CARD_R))
-                            .border_1()
-                            .border_color(gpui::Rgba { r: 1., g: 1., b: 1., a: 0.1 })
+                            .border_2()
+                            .border_color(gpui::Rgba { r: 1., g: 1., b: 1., a: 0.05 })
                             .bg(fade(INK, 0.78))
                             .shadow_lg()
                             .overflow_hidden()
@@ -1194,11 +1233,33 @@ impl gpui::Render for NotificationStack {
     }
 }
 
-fn ghost_card(y: f32, inset: f32, slide: f32) -> gpui::Div {
-    div()
-        .absolute()
-        .top(px(y))
-        .right(px(inset - slide))
+fn edge(el: gpui::Div, left: bool, offset: f32) -> gpui::Div {
+    if left { el.left(px(offset)) } else { el.right(px(offset)) }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PanelCmd {
+    Move(f32, f32),
+    Line(f32, f32),
+    Quad(f32, f32, f32, f32),
+}
+
+fn panel_outline(w: f32, h: f32, left: bool) -> Vec<PanelCmd> {
+    let x = |v: f32| if left { w - v } else { v };
+    let r = CARD_R;
+    vec![
+        PanelCmd::Move(x(0.), 0.),
+        PanelCmd::Line(x(w), 0.),
+        PanelCmd::Line(x(w), h),
+        PanelCmd::Line(x(r * 2.), h),
+        PanelCmd::Quad(x(r), h - r, x(r), h),
+        PanelCmd::Line(x(r), r),
+        PanelCmd::Quad(x(0.), 0., x(r), 0.),
+    ]
+}
+
+fn ghost_card(y: f32, inset: f32, slide: f32, left: bool) -> gpui::Div {
+    edge(div().absolute().top(px(y)), left, inset - slide)
         .w(px(POPUP_W - inset * 2.))
         .h(px(CARD_H))
         .rounded(px(CARD_R))
@@ -1207,9 +1268,7 @@ fn ghost_card(y: f32, inset: f32, slide: f32) -> gpui::Div {
 
 fn more_chip(hidden: usize) -> gpui::Div {
     div()
-        .absolute()
-        .bottom(px(6.))
-        .right(px(8.))
+        .flex_shrink_0()
         .px(px(7.))
         .py(px(1.))
         .rounded(px(9.))
@@ -1244,7 +1303,10 @@ pub fn open_window(cx: &mut gpui::App, queue: Queue, config: Config) -> anyhow::
             }),
             ..Default::default()
         },
-        move |_, cx| cx.new(|cx| NotificationStack::new(cx, queue, config.max_visible)),
+        move |_, cx| {
+            let left = config.anchor == ConfigAnchor::TopLeft;
+            cx.new(|cx| NotificationStack::new(cx, queue, config.max_visible, left))
+        },
     )?;
     Ok(())
 }
@@ -1303,6 +1365,31 @@ mod tests {
     fn visible_count_caps_full_queue() {
         assert_eq!(visible_count(KEEP, 5), 5);
         assert_eq!(visible_count(KEEP, 12), KEEP);
+    }
+
+    #[test]
+    fn panel_outline_mirrors_the_flare_for_the_left_anchor() {
+        let (w, h) = (POPUP_W + MARGIN * 2. + CARD_R, PANEL_H);
+        let right = panel_outline(w, h, false);
+        let left = panel_outline(w, h, true);
+
+        let expected: Vec<PanelCmd> = right
+            .iter()
+            .map(|cmd| match *cmd {
+                PanelCmd::Move(x, y) => PanelCmd::Move(w - x, y),
+                PanelCmd::Line(x, y) => PanelCmd::Line(w - x, y),
+                PanelCmd::Quad(to_x, to_y, ctrl_x, ctrl_y) => {
+                    PanelCmd::Quad(w - to_x, to_y, w - ctrl_x, ctrl_y)
+                }
+            })
+            .collect();
+        assert_eq!(left, expected, "left anchor must be the x-mirror of the right one");
+        assert_ne!(left, right, "left anchor must not reuse the right-anchored outline");
+
+        assert_eq!(right[1], PanelCmd::Line(w, 0.), "right anchor is flush on the right");
+        assert_eq!(left[1], PanelCmd::Line(0., 0.), "left anchor is flush on the left");
+        assert_eq!(right[5], PanelCmd::Line(CARD_R, CARD_R));
+        assert_eq!(left[5], PanelCmd::Line(w - CARD_R, CARD_R), "flare moves to the right");
     }
 
     use crate::presentation::theme::STACK_TOP;
@@ -1379,6 +1466,23 @@ mod tests {
         let alive: Vec<&feed::Exiting> = vec![&leaving];
         let with_exit = glide.advance(&notices, 5, None, &alive, false, 1_016);
         assert_eq!(with_exit.total_h, 500. + CARD_H + CARD_GAP);
+    }
+
+    #[test]
+    fn advance_records_only_rendered_y_for_collapsed_decks() {
+        let mut glide = GlideState::default();
+        let notices = vec![mk(1, "A"), mk(2, "A"), mk(3, "B")];
+        glide.advance(&notices, 5, None, &[], false, 1_000);
+        assert_eq!(glide.visible_y.get(&1).copied(), Some(STACK_TOP));
+        assert_eq!(
+            glide.visible_y.get(&3).copied(),
+            Some(STACK_TOP + CARD_H + geometry::STACK_PEEK + CARD_GAP)
+        );
+        assert!(!glide.visible_y.contains_key(&2), "id escondido no deck colapsado");
+
+        let mut capped = GlideState::default();
+        capped.advance(&notices, 1, None, &[], false, 1_000);
+        assert!(!capped.visible_y.contains_key(&3), "sem slot acima do max_visible");
     }
 
     #[test]
