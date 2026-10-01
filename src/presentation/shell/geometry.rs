@@ -9,45 +9,6 @@ const STRIDE: f32 = CARD_H + CARD_GAP;
 
 pub const STACK_PEEK: f32 = 10.;
 
-pub(crate) fn grouped_y(notices: &[Notice], idx: usize) -> f32 {
-    grouped_y_map(notices).get(idx).copied().unwrap_or(STACK_TOP)
-}
-
-pub fn grouped_y_map(notices: &[Notice]) -> Vec<f32> {
-    if notices.is_empty() {
-        return Vec::new();
-    }
-    let mut app_order: Vec<String> = Vec::new();
-    let mut app_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut seen: HashMap<String, ()> = HashMap::new();
-    for (i, n) in notices.iter().enumerate() {
-        if seen.insert(n.app.clone(), ()).is_none() {
-            app_order.push(n.app.clone());
-        }
-        app_to_indices.entry(n.app.clone()).or_default().push(i);
-    }
-    let mut y_map = vec![0.; notices.len()];
-    let mut y_cursor = STACK_TOP;
-    for app in app_order {
-        if let Some(indices) = app_to_indices.get(&app) {
-            for (k, &orig_idx) in indices.iter().enumerate() {
-                y_map[orig_idx] = y_cursor + k as f32 * STRIDE;
-            }
-            let deck_h = indices.len() as f32 * STRIDE - CARD_GAP;
-            y_cursor += deck_h + CARD_GAP;
-        }
-    }
-    y_map
-}
-
-pub fn total_h_current_for(notices: &[Notice], n: usize) -> f32 {
-    if n == 0 {
-        return 0.;
-    }
-    let y_map = grouped_y_map(notices);
-    y_map.iter().take(n).fold(STACK_TOP, |a, &y| a.max(y)) + CARD_H
-}
-
 pub struct Deck {
     pub app: String,
     pub indices: Vec<usize>,
@@ -231,53 +192,6 @@ mod tests {
         let (positions, _, _) = deck_layout(&notices, &decks, &shown);
         let regions = deck_input_regions(&decks, &shown, &positions);
         assert!(regions[0].contains(&point(px(MARGIN), px(STACK_TOP + CARD_H + STACK_PEEK / 2.))));
-    }
-
-    #[test]
-    fn interleaved_apps_total_h_uses_max_y_not_last_index() {
-        let notices = vec![mk(1, "A"), mk(2, "B"), mk(3, "A")];
-        let n = notices.len();
-        let y_map = grouped_y_map(&notices);
-        assert_eq!(y_map.len(), 3);
-        assert!((y_map[0] - STACK_TOP).abs() < 0.01);
-        assert!((y_map[1] - (STACK_TOP + 2. * STRIDE)).abs() < 0.01);
-        assert!((y_map[2] - (STACK_TOP + STRIDE)).abs() < 0.01);
-        let got = total_h_current_for(&notices, n);
-        assert!((got - (STACK_TOP + 2. * STRIDE + CARD_H)).abs() < 0.01);
-    }
-
-    #[test]
-    fn same_app_cards_do_not_overlap() {
-        let notices = vec![mk(1, "A"), mk(2, "A"), mk(3, "A")];
-        let y_map = grouped_y_map(&notices);
-        assert!((y_map[1] - y_map[0] - 62.).abs() < 0.01);
-        assert!((y_map[2] - y_map[1] - 62.).abs() < 0.01);
-    }
-
-    #[test]
-    fn total_h_zero_visible_is_zero() {
-        let notices = vec![mk(1, "A")];
-        assert_eq!(total_h_current_for(&notices, 0), 0.);
-        assert_eq!(total_h_current_for(&[], 0), 0.);
-    }
-
-    #[test]
-    fn empty_map_and_out_of_range_fallback() {
-        let empty: Vec<Notice> = vec![];
-        assert!(grouped_y_map(&empty).is_empty());
-        assert!((grouped_y(&empty, 0) - STACK_TOP).abs() < 0.01);
-        let notices = vec![mk(1, "A")];
-        assert!((grouped_y(&notices, 99) - STACK_TOP).abs() < 0.01);
-    }
-
-    #[test]
-    fn decks_do_not_overlap_across_apps() {
-        let notices = vec![mk(1, "A"), mk(2, "B"), mk(3, "A"), mk(4, "B")];
-        let mut ys = grouped_y_map(&notices);
-        ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        for w in ys.windows(2) {
-            assert!(w[1] - w[0] >= CARD_H - 0.01, "cards sobrepostos: {ys:?}");
-        }
     }
 
     #[test]

@@ -7,9 +7,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use gpui::{FontWeight, ParentElement, Styled, StyledImage, div, img, prelude::*, px, relative};
 
 use crate::domain::notice::Notice;
-use crate::presentation::theme::{
-    ACCENT, MUTED, TEXT, TEXT_BADGE, TEXT_BODY, TEXT_TITLE, app_font, fade,
-};
+use crate::presentation::theme::{ACCENT, MUTED, TEXT, TEXT_BADGE, TEXT_BODY, TEXT_TITLE, fade};
 
 pub fn badge_initial(app: &str) -> String {
     app.chars()
@@ -41,8 +39,7 @@ pub fn badge<T: 'static>(
         }
     }
 
-    base.font(app_font())
-        .text_size(px(TEXT_BADGE))
+    base.text_size(px(TEXT_BADGE))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(fade(MUTED, 1.))
         .child(badge_initial(app))

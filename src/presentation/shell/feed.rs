@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use crate::application::clock;
 use crate::domain::notice::Notice;
 
-use super::{anim, geometry};
+use super::anim;
 
 #[derive(Clone, Default)]
 pub struct Stack {
@@ -17,10 +19,11 @@ pub struct Exiting {
 pub fn sync_snapshot(
     stack: &mut Stack,
     exiting: &mut Vec<Exiting>,
+    rendered_y: &HashMap<u32, f32>,
     snapshot: Vec<Notice>,
     quiet: bool,
 ) -> bool {
-    let changed = apply_snapshot(stack, exiting, snapshot);
+    let changed = apply_snapshot(stack, exiting, rendered_y, snapshot);
     if quiet {
         exiting.clear();
     }
@@ -30,13 +33,16 @@ pub fn sync_snapshot(
 pub fn apply_snapshot(
     stack: &mut Stack,
     exiting: &mut Vec<Exiting>,
+    rendered_y: &HashMap<u32, f32>,
     snapshot: Vec<Notice>,
 ) -> bool {
     let now_ms = clock::now_ms();
     let mut removed: Vec<(u32, f32)> = Vec::new();
-    for (idx, old) in stack.notices.iter().enumerate() {
-        if !snapshot.iter().any(|n| n.id == old.id) {
-            removed.push((old.id, geometry::grouped_y(&stack.notices, idx)));
+    for old in &stack.notices {
+        if !snapshot.iter().any(|n| n.id == old.id)
+            && let Some(&y) = rendered_y.get(&old.id)
+        {
+            removed.push((old.id, y));
         }
     }
     for (id, y) in &removed {
@@ -78,14 +84,18 @@ mod tests {
         }
     }
 
+    fn rendered(pairs: &[(u32, f32)]) -> HashMap<u32, f32> {
+        pairs.iter().copied().collect()
+    }
+
     #[test]
     fn quiet_expiration_does_not_leave_cards_to_reappear() {
         let mut stack = Stack { notices: vec![mk(1, "A")] };
         let mut exiting = Vec::new();
-        assert!(sync_snapshot(&mut stack, &mut exiting, vec![], true));
+        assert!(sync_snapshot(&mut stack, &mut exiting, &rendered(&[]), vec![], true));
         assert!(stack.notices.is_empty());
         assert!(exiting.is_empty());
-        assert!(!sync_snapshot(&mut stack, &mut exiting, vec![], false));
+        assert!(!sync_snapshot(&mut stack, &mut exiting, &rendered(&[]), vec![], false));
         assert!(exiting.is_empty());
     }
 
@@ -93,9 +103,9 @@ mod tests {
     fn entering_quiet_mode_clears_existing_exit_animation() {
         let mut stack = Stack { notices: vec![mk(1, "A")] };
         let mut exiting = Vec::new();
-        sync_snapshot(&mut stack, &mut exiting, vec![], false);
+        sync_snapshot(&mut stack, &mut exiting, &rendered(&[(1, STACK_TOP)]), vec![], false);
         assert_eq!(exiting.len(), 1);
-        sync_snapshot(&mut stack, &mut exiting, vec![], true);
+        sync_snapshot(&mut stack, &mut exiting, &rendered(&[(1, STACK_TOP)]), vec![], true);
         assert!(exiting.is_empty());
     }
 
@@ -103,7 +113,7 @@ mod tests {
     fn identical_snapshot_reports_no_change() {
         let mut stack = Stack { notices: vec![mk(1, "A")] };
         let mut exiting = Vec::new();
-        assert!(!apply_snapshot(&mut stack, &mut exiting, vec![mk(1, "A")]));
+        assert!(!apply_snapshot(&mut stack, &mut exiting, &rendered(&[]), vec![mk(1, "A")]));
         assert!(exiting.is_empty());
     }
 
@@ -111,7 +121,12 @@ mod tests {
     fn added_notice_reports_change_by_id() {
         let mut stack = Stack { notices: vec![mk(1, "A")] };
         let mut exiting = Vec::new();
-        assert!(apply_snapshot(&mut stack, &mut exiting, vec![mk(1, "A"), mk(2, "B")]));
+        assert!(apply_snapshot(
+            &mut stack,
+            &mut exiting,
+            &rendered(&[]),
+            vec![mk(1, "A"), mk(2, "B")]
+        ));
         assert_eq!(stack.notices.len(), 2);
         assert!(exiting.is_empty());
     }
@@ -120,11 +135,21 @@ mod tests {
     fn removed_notice_moves_to_exiting_once() {
         let mut stack = Stack { notices: vec![mk(1, "A"), mk(2, "B")] };
         let mut exiting = Vec::new();
-        assert!(apply_snapshot(&mut stack, &mut exiting, vec![mk(2, "B")]));
+        assert!(apply_snapshot(
+            &mut stack,
+            &mut exiting,
+            &rendered(&[(1, STACK_TOP)]),
+            vec![mk(2, "B")]
+        ));
         assert_eq!(exiting.len(), 1);
         assert_eq!(exiting[0].notice.id, 1);
         assert!((exiting[0].y - STACK_TOP).abs() < 0.01);
-        assert!(apply_snapshot(&mut stack, &mut exiting, vec![mk(2, "B")]));
+        assert!(apply_snapshot(
+            &mut stack,
+            &mut exiting,
+            &rendered(&[(1, STACK_TOP)]),
+            vec![mk(2, "B")]
+        ));
         assert_eq!(exiting.len(), 1, "exiting não deve duplicar");
     }
 
@@ -134,7 +159,7 @@ mod tests {
         let mut exiting = Vec::new();
         let mut updated = mk(1, "A");
         updated.body = "new".into();
-        assert!(apply_snapshot(&mut stack, &mut exiting, vec![updated]));
+        assert!(apply_snapshot(&mut stack, &mut exiting, &rendered(&[]), vec![updated]));
         assert!(exiting.is_empty());
     }
 
@@ -142,10 +167,20 @@ mod tests {
     fn exiting_never_duplicates_across_repeated_snapshots() {
         let mut stack = Stack { notices: vec![mk(1, "A"), mk(2, "B")] };
         let mut exiting = Vec::new();
-        assert!(apply_snapshot(&mut stack, &mut exiting, vec![mk(2, "B")]));
+        assert!(apply_snapshot(
+            &mut stack,
+            &mut exiting,
+            &rendered(&[(1, STACK_TOP)]),
+            vec![mk(2, "B")]
+        ));
         assert_eq!(exiting.len(), 1);
         for _ in 0..3 {
-            apply_snapshot(&mut stack, &mut exiting, vec![mk(2, "B")]);
+            apply_snapshot(
+                &mut stack,
+                &mut exiting,
+                &rendered(&[(1, STACK_TOP)]),
+                vec![mk(2, "B")],
+            );
             assert_eq!(exiting.len(), 1);
             let mut ids: Vec<u32> = exiting.iter().map(|e| e.notice.id).collect();
             ids.sort_unstable();
@@ -161,12 +196,12 @@ mod tests {
         let mut exiting = Vec::new();
         let mut updated = mk(1, "A");
         updated.body = "new".into();
-        assert!(apply_snapshot(&mut stack, &mut exiting, vec![updated.clone()]));
+        assert!(apply_snapshot(&mut stack, &mut exiting, &rendered(&[]), vec![updated.clone()]));
         assert!(exiting.is_empty());
         assert_eq!(stack.notices.len(), 1);
         assert_eq!(stack.notices[0].id, 1);
         assert_eq!(stack.notices[0].body, "new");
-        assert!(!apply_snapshot(&mut stack, &mut exiting, vec![updated]));
+        assert!(!apply_snapshot(&mut stack, &mut exiting, &rendered(&[]), vec![updated]));
         assert!(exiting.is_empty());
         assert_eq!(stack.notices.len(), 1);
     }
@@ -177,12 +212,12 @@ mod tests {
         let mut exiting = Vec::new();
         let mut updated = mk(1, "A");
         updated.progress = Some(10);
-        assert!(apply_snapshot(&mut stack, &mut exiting, vec![updated.clone()]));
+        assert!(apply_snapshot(&mut stack, &mut exiting, &rendered(&[]), vec![updated.clone()]));
         updated.progress = Some(90);
-        assert!(apply_snapshot(&mut stack, &mut exiting, vec![updated.clone()]));
+        assert!(apply_snapshot(&mut stack, &mut exiting, &rendered(&[]), vec![updated.clone()]));
         assert_eq!(stack.notices[0].progress, Some(90));
         updated.progress = None;
-        assert!(apply_snapshot(&mut stack, &mut exiting, vec![updated]));
+        assert!(apply_snapshot(&mut stack, &mut exiting, &rendered(&[]), vec![updated]));
         assert_eq!(stack.notices[0].progress, None);
         assert!(exiting.is_empty());
     }
@@ -191,15 +226,36 @@ mod tests {
     fn full_turnover_moves_every_old_notice_to_exiting_once() {
         let mut stack = Stack { notices: vec![mk(1, "A"), mk(2, "B"), mk(3, "C")] };
         let mut exiting = Vec::new();
-        assert!(apply_snapshot(&mut stack, &mut exiting, vec![mk(4, "A"), mk(5, "B")]));
+        let y = &[(1, 0.), (2, 60.), (3, 120.)];
+        assert!(apply_snapshot(
+            &mut stack,
+            &mut exiting,
+            &rendered(y),
+            vec![mk(4, "A"), mk(5, "B")]
+        ));
         assert_eq!(exiting.len(), 3);
         let mut ids: Vec<u32> = exiting.iter().map(|e| e.notice.id).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec![1, 2, 3]);
-        assert!(apply_snapshot(&mut stack, &mut exiting, vec![mk(4, "A"), mk(5, "B")]));
+        assert!(apply_snapshot(
+            &mut stack,
+            &mut exiting,
+            &rendered(y),
+            vec![mk(4, "A"), mk(5, "B")]
+        ));
         assert_eq!(exiting.len(), 3);
         let mut ids: Vec<u32> = exiting.iter().map(|e| e.notice.id).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn exit_starts_at_last_rendered_y_and_hidden_cards_never_exit() {
+        let mut stack = Stack { notices: vec![mk(1, "A"), mk(2, "B")] };
+        let mut exiting = Vec::new();
+        assert!(apply_snapshot(&mut stack, &mut exiting, &rendered(&[(1, 84.)]), vec![]));
+        assert_eq!(exiting.len(), 1, "só o card visível deve animar a saída");
+        assert_eq!(exiting[0].notice.id, 1);
+        assert!((exiting[0].y - 84.).abs() < 0.01, "y deve ser o último renderizado");
     }
 }
