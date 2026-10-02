@@ -56,5 +56,5 @@ install -m 0755 "$tmp/${NAME}" "$DEST/${NAME}"
 
 printf 'installed %s\n' "$DEST/${NAME}"
 printf '\nAutostart it from your compositor, e.g.:\n'
-printf '  nobody &\n'
+printf '  exec-once = nobody   # Hyprland\n'
 printf '\nMake sure %s is on PATH, then run:  %s\n' "$DEST" "$NAME"
